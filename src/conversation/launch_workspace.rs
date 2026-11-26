@@ -8,7 +8,7 @@ use gpui_component::{
 };
 use huggler::{Project, workspace::WorktreeBranch};
 use markdown::{ParseOptions, mdast::Node, to_mdast};
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum WorkspaceMode {
@@ -22,6 +22,7 @@ pub(super) enum WorktreeStage {
     ResolveBase,
     Checkout,
     OpenConversation,
+    Ready,
 }
 
 pub(super) struct LaunchProgress {
@@ -30,73 +31,88 @@ pub(super) struct LaunchProgress {
     pub stage: Option<WorktreeStage>,
 }
 
-impl LaunchProgress {
-    pub(super) fn render(&self, cx: &App) -> Div {
-        let view = v_flex().size_full().items_center().justify_center().p_4();
-        let Some(current) = self.stage else {
-            return view.child(label("Opening conversation…"));
-        };
-        let theme = cx.theme();
-        let steps = [
-            (WorktreeStage::ResolveBase, "Select base branch"),
-            (WorktreeStage::Checkout, "Create branch and check out files"),
-            (WorktreeStage::OpenConversation, "Open conversation"),
-        ];
-        view.child(
-            v_flex()
-                .w_full()
-                .max_w(px(420.))
-                .gap_4()
-                .p_5()
-                .rounded_xl()
-                .border_1()
-                .border_color(theme.border)
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(control!(
-                            "Setting up worktree",
-                            crate::ui::heading("Setting up worktree")
-                        ))
-                        .child(hint(self.title.clone(), cx).truncate()),
-                )
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .pt_4()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .children(steps.into_iter().map(|(stage, name)| {
-                            let (indicator, status) = match stage.cmp(&current) {
-                                std::cmp::Ordering::Less => (
-                                    Icon::new(IconName::Check)
-                                        .with_size(px(14.))
-                                        .into_any_element(),
-                                    "Done",
-                                ),
-                                std::cmp::Ordering::Equal => (
-                                    Spinner::new().with_size(px(14.)).into_any_element(),
-                                    "In progress",
-                                ),
-                                std::cmp::Ordering::Greater => (
-                                    Icon::new(IconName::Minus)
-                                        .with_size(px(14.))
-                                        .into_any_element(),
-                                    "Waiting",
-                                ),
-                            };
-                            control!(
-                                format!("{name}/{status}"),
-                                h_flex()
-                                    .gap_2()
-                                    .child(div().flex_shrink_0().child(indicator))
-                                    .child(label(name).flex_1())
-                                    .child(hint(status, cx).flex_shrink_0())
-                            )
-                        })),
+// Record the checkout before launching the conversation so the first snapshot
+// can show setup even if Bear exits before the first prompt is enqueued.
+pub(super) fn record_worktree(
+    state: &Path,
+    thread: &ThreadId,
+    root: &Path,
+) -> anyhow::Result<PathBuf> {
+    let path = worktree_record(state, thread)?;
+    let directory = path.parent().expect("worktree history directory");
+    fs::create_dir_all(directory)?;
+    let mut pending = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(&mut pending, root)?;
+    pending.as_file().sync_all()?;
+    pending.persist(&path)?;
+    Ok(path)
+}
+
+pub(super) fn has_worktree_record(state: &Path, thread: &ThreadId, root: &Path) -> bool {
+    worktree_record(state, thread)
+        .ok()
+        .and_then(|path| fs::File::open(path).ok())
+        .and_then(|file| serde_json::from_reader::<_, PathBuf>(file).ok())
+        .is_some_and(|checkout| checkout == root)
+}
+
+fn worktree_record(state: &Path, thread: &ThreadId) -> anyhow::Result<PathBuf> {
+    let id = Uuid::parse_str(&thread.0)?;
+    Ok(state.join("worktree-history").join(format!("{id}.json")))
+}
+
+pub(super) fn worktree_setup(current: WorktreeStage, title: Option<&str>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let heading = if current == WorktreeStage::Ready {
+        "Worktree ready"
+    } else {
+        "Setting up worktree"
+    };
+    let steps = [
+        (WorktreeStage::ResolveBase, "Select base branch"),
+        (WorktreeStage::Checkout, "Create branch and check out files"),
+        (WorktreeStage::OpenConversation, "Open conversation"),
+    ];
+    v_flex()
+        .w_full()
+        .max_w(px(420.))
+        .gap_2()
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.border)
+        .child(control!(heading, crate::ui::section_title(heading)))
+        .when_some(title, |card, title| {
+            card.child(hint(title.to_owned(), cx).truncate())
+        })
+        .children(steps.into_iter().map(|(stage, name)| {
+            let (indicator, status) = match stage.cmp(&current) {
+                std::cmp::Ordering::Less => (
+                    Icon::new(IconName::Check)
+                        .with_size(px(14.))
+                        .into_any_element(),
+                    "Done",
                 ),
-        )
-    }
+                std::cmp::Ordering::Equal => (
+                    Spinner::new().with_size(px(14.)).into_any_element(),
+                    "In progress",
+                ),
+                std::cmp::Ordering::Greater => (
+                    Icon::new(IconName::Minus)
+                        .with_size(px(14.))
+                        .into_any_element(),
+                    "Waiting",
+                ),
+            };
+            control!(
+                format!("{name}/{status}"),
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_shrink_0().child(indicator))
+                    .child(label(name).flex_1().min_w_0())
+                    .child(hint(status, cx).flex_shrink_0())
+            )
+        }))
 }
 
 pub(super) fn conversation_title(message: &str, attachment: Option<&str>) -> String {
@@ -191,8 +207,26 @@ pub(super) fn conversation_title(message: &str, attachment: Option<&str>) -> Str
 }
 
 #[cfg(test)]
-mod title_tests {
-    use super::conversation_title;
+mod tests {
+    use super::{conversation_title, has_worktree_record, record_worktree};
+    use huggler::ThreadId;
+    use uuid::Uuid;
+
+    #[test]
+    fn setup_history_is_scoped_to_the_launched_conversation_and_checkout() -> anyhow::Result<()> {
+        let state = tempfile::tempdir()?;
+        let thread = ThreadId(Uuid::new_v4().to_string());
+        let other_thread = ThreadId(Uuid::new_v4().to_string());
+        let checkout = state.path().join("new worktree");
+        let original = state.path().join("original checkout");
+
+        assert!(!has_worktree_record(state.path(), &thread, &checkout));
+        record_worktree(state.path(), &thread, &checkout)?;
+        assert!(has_worktree_record(state.path(), &thread, &checkout));
+        assert!(!has_worktree_record(state.path(), &thread, &original));
+        assert!(!has_worktree_record(state.path(), &other_thread, &checkout));
+        Ok(())
+    }
 
     #[test]
     fn derives_the_title_from_the_first_task() {

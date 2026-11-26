@@ -417,14 +417,14 @@ def check(binary, *, settlement_only=False):
         show(pr, {"see": "Merge"}, {"next_prompt_answer": 1}, {"click": "Merge"}, {"see": "Merged"})
         show(dict(pr, state="CLOSED"), {"see": "PR closed"})
         show(dict(pr, mergeable="CONFLICTING"), {"see": "Resolve"}, {"click": "Resolve"},
-             {"contains": "You/Resolve the merge conflicts for fixture/project #12"},
+             {"contains": f"You/Resolve the merge conflicts for {pr['url']}"},
              {"see": "Codex/Received the pull request task."})
         failed = {"state": "PENDING", "contexts": {"nodes": [{"conclusion": "TIMED_OUT"}]}}
         commits = {"nodes": [{"commit": {"statusCheckRollup": failed}}]}
         show(dict(pr, commits=commits, mergeStateStatus="BLOCKED"),
              {"click": "Message"}, {"type": "Review the staged result."},
              {"see": "Fix"}, {"click": "Fix"},
-             {"contains": "You/Fix the failed checks or address requested review changes"},
+             {"contains": f"You/Fix the failed checks or address requested changes for {pr['url']}"},
              {"click": "Send"}, {"see": "Codex/Reviewed the staged result."})
         show(dict(pr, reviewDecision="CHANGES_REQUESTED"), {"see": "Fix"})
         show(dict(pr, headRefOid="0" * 40), {"see": "View PR"})
@@ -434,7 +434,8 @@ def check(binary, *, settlement_only=False):
                        input=f"100644 {blob} 1\tconflict.txt\n100644 {blob} 2\tconflict.txt\n",
                        text=True, check=True)
         show(None, {"see": "Resolve"}, {"click": "Resolve"},
-             {"contains": "You/Resolve the Git merge conflicts in this checkout."})
+             {"contains": "You/Resolve the Git conflicts in this checkout and continue the operation in progress."},
+             {"see": "Codex/Received the pull request task."})
 
         # Local commits on the base branch do not make it a PR head.
         checkout = root / "repository"

@@ -750,6 +750,11 @@ impl Desktop {
     fn backlog_row(&self, id: Uuid, draft: &SavedDraft, cx: &Context<Self>) -> Div {
         let launch = &draft.launch;
         let sending = self.backlog.sending == Some(id);
+        let setup = self
+            .launching
+            .as_ref()
+            .filter(|progress| sending && progress.thread.0 == id.to_string())
+            .and_then(|progress| progress.stage);
         let error = self.backlog.errors.get(&id);
         let action = if sending {
             "Starting…"
@@ -899,6 +904,9 @@ impl Desktop {
                     .when_some(edit, |body, edit| body.child(self.draft_editor(edit, cx)))
                     .child(metadata)
                     .child(actions)
+                    .when_some(setup, |row, stage| {
+                        row.child(super::launch_workspace::worktree_setup(stage, None, cx))
+                    })
                     .when_some(error, |body, error| {
                         body.child(control!(
                             format!("error/{}", error.message()),
