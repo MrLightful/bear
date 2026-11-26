@@ -17,6 +17,8 @@ use std::{
 pub enum Step {
     Click(String),
     Hover(String),
+    ClickFromBottomRight(String, [f32; 2]),
+    ShowScrollbars,
     DragX(String, i16),
     DragY(String, i16),
     CenterX(String, i16),
@@ -147,6 +149,46 @@ fn bear_window_number(app: &NSApplication) -> Option<isize> {
         .map(|window| window.windowNumber())
 }
 
+fn post_mouse(step: &Step, position: Point<Pixels>, window: &Window) -> bool {
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().expect("GPUI thread"));
+    let Some(number) = bear_window_number(&app) else {
+        return false;
+    };
+    let events = match step {
+        Step::Hover(_) => vec![(NSEventType::MouseMoved, 0.)],
+        Step::DragX(_, delta) | Step::DragY(_, delta) => {
+            let offset = f64::from(*delta);
+            vec![
+                (NSEventType::LeftMouseDown, 0.),
+                (NSEventType::LeftMouseDragged, offset / 2.),
+                (NSEventType::LeftMouseDragged, offset),
+                (NSEventType::LeftMouseUp, offset),
+            ]
+        }
+        _ => vec![
+            (NSEventType::LeftMouseDown, 0.),
+            (NSEventType::LeftMouseUp, 0.),
+        ],
+    };
+    for (kind, offset) in events {
+        let (dx, dy) = if matches!(step, Step::DragY(..)) {
+            (0., offset)
+        } else {
+            (offset, 0.)
+        };
+        let location = NSPoint::new(
+            f64::from(position.x) + dx,
+            f64::from(window.viewport_size().height - position.y) - dy,
+        );
+
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind, location, NSEventModifierFlags::empty(), 0., number, None, 0, 1, 1.
+        ).expect("create click event");
+        app.postEvent_atStart(&event, false);
+    }
+    true
+}
+
 fn advance(step: &Step, window: &mut Window, cx: &mut App) -> bool {
     // AppKit can suspend display-link callbacks for a background window.
     // Lay out a fresh frame before hit-testing or dispatching to the focused editor.
@@ -188,6 +230,12 @@ fn advance(step: &Step, window: &mut Window, cx: &mut App) -> bool {
         }
         Step::FileText(path, expected) => fs::read_to_string(path).as_ref().ok() == Some(expected),
         Step::FileSize(path, size) => fs::metadata(path).is_ok_and(|file| file.len() == *size),
+        Step::ShowScrollbars => {
+            gpui_component::Theme::global_mut(cx).scrollbar_show =
+                gpui_component::scroll::ScrollbarShow::Always;
+            window.refresh();
+            true
+        }
         Step::Resize([width, height]) => {
             window.resize(size(px(f32::from(*width)), px(f32::from(*height))));
             true
@@ -200,45 +248,14 @@ fn advance(step: &Step, window: &mut Window, cx: &mut App) -> bool {
             let Some(bounds) = controls.get(key.as_str()) else {
                 return false;
             };
-            let position = bounds.center();
-            let app =
-                NSApplication::sharedApplication(MainThreadMarker::new().expect("GPUI thread"));
-            let Some(number) = bear_window_number(&app) else {
+            post_mouse(step, bounds.center(), window)
+        }
+        Step::ClickFromBottomRight(key, [x, y]) => {
+            let Some(bounds) = controls.get(key.as_str()) else {
                 return false;
             };
-            let events = match step {
-                Step::Hover(_) => vec![(NSEventType::MouseMoved, 0.)],
-                Step::DragX(_, delta) | Step::DragY(_, delta) => {
-                    let offset = f64::from(*delta);
-                    vec![
-                        (NSEventType::LeftMouseDown, 0.),
-                        (NSEventType::LeftMouseDragged, offset / 2.),
-                        (NSEventType::LeftMouseDragged, offset),
-                        (NSEventType::LeftMouseUp, offset),
-                    ]
-                }
-                _ => vec![
-                    (NSEventType::LeftMouseDown, 0.),
-                    (NSEventType::LeftMouseUp, 0.),
-                ],
-            };
-            for (kind, offset) in events {
-                let (dx, dy) = if matches!(step, Step::DragY(..)) {
-                    (0., offset)
-                } else {
-                    (offset, 0.)
-                };
-                let location = NSPoint::new(
-                    f64::from(position.x) + dx,
-                    f64::from(window.viewport_size().height - position.y) - dy,
-                );
-
-                let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                    kind, location, NSEventModifierFlags::empty(), 0., number, None, 0, 1, 1.
-                ).expect("create click event");
-                app.postEvent_atStart(&event, false);
-            }
-            true
+            let position = bounds.bottom_right() - point(px(*x), px(*y));
+            post_mouse(step, position, window)
         }
         Step::Key(key) => window.dispatch_keystroke(
             Keystroke::parse(key).expect("valid qualification keystroke"),

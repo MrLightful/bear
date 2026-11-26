@@ -2224,7 +2224,7 @@ impl Render for Desktop {
                         WorkspaceTab::AllFiles => workspace.files.clone().into_any_element(),
                         WorkspaceTab::Changes => workspace.changes.clone().into_any_element(),
                         WorkspaceTab::Traces => {
-                            self.trace_panel(&workspace.traces, cx).into_any_element()
+                            self.trace_panel(&thread.id, window, cx).into_any_element()
                         }
                     };
                     layout.child(

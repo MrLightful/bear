@@ -49,6 +49,46 @@ pub(crate) fn control_text_size() -> Rems {
     rems(0.8125)
 }
 
+pub(crate) fn keyboard_scroll_viewport(
+    id: impl Into<ElementId>,
+    scroll: &UniformListScrollHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Stateful<Div> {
+    let id = id.into();
+    let focus = window
+        .use_keyed_state(id.clone(), cx, |_, cx| cx.focus_handle())
+        .read(cx)
+        .clone();
+    let scroll = scroll.0.borrow().base_handle.clone();
+    let ring = cx.theme().ring;
+    div()
+        .id(id)
+        .track_focus(&focus)
+        .tab_stop(true)
+        .border_1()
+        .border_color(transparent_black())
+        .focus(move |style| style.border_color(ring))
+        .on_key_down(move |event, window, cx| {
+            if event.keystroke.modifiers.modified() || scroll.max_offset().height <= px(0.) {
+                return;
+            }
+            let offset = scroll.offset();
+            let page = scroll.bounds().size.height;
+            let y = match event.keystroke.key.as_str() {
+                "pageup" => offset.y + page,
+                "pagedown" => offset.y - page,
+                "home" => px(0.),
+                "end" => -scroll.max_offset().height,
+                _ => return,
+            };
+            window.focus(&focus);
+            scroll.set_offset(point(offset.x, y));
+            window.refresh();
+            cx.stop_propagation();
+        })
+}
+
 pub fn heading(text: impl Into<SharedString>) -> Div {
     div()
         .text_lg()

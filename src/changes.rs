@@ -3,7 +3,7 @@ mod approvals;
 use crate::{
     git::{self, ChangeScope, File, FileChange, LineCounts, PreparedRevert},
     open_in::{OpenIn, file_menu},
-    ui::{hint, label},
+    ui::{hint, keyboard_scroll_viewport, label},
 };
 use anyhow::Context as _;
 pub(crate) use approvals::ReviewRow;
@@ -14,6 +14,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+    scroll::ScrollableElement,
     tooltip::Tooltip,
     v_flex,
 };
@@ -32,6 +33,7 @@ pub struct Changes {
     requested_filter: Filter,
     filter_focus: FocusHandle,
     filter_menu: Option<FilterMenu>,
+    scroll: [UniformListScrollHandle; Filter::OPTIONS.len()],
     snapshot: Option<anyhow::Result<Vec<ReviewRow>>>,
     error: Option<String>,
     mutation: Option<Mutation>,
@@ -114,6 +116,7 @@ impl Changes {
             requested_filter: Filter::All,
             filter_focus: cx.focus_handle(),
             filter_menu: None,
+            scroll: Default::default(),
             snapshot: None,
             error,
             mutation: None,
@@ -795,6 +798,8 @@ impl Changes {
                     )
                 }),
         )
+        .h(px(32.))
+        .w_full()
         .min_w_0()
         .flex_shrink_0()
     }
@@ -866,15 +871,34 @@ impl Render for Changes {
                     };
                     control!(message, hint(message, cx).px_3().py_2()).into_any_element()
                 }
-                Some(Ok(rows)) => v_flex()
-                    .id(("change-files", self.filter as usize))
+                Some(Ok(rows)) => {
+                    let scroll = &self.scroll[self.filter as usize];
+                    let list = uniform_list(
+                        ("change-files", self.filter as usize),
+                        rows.len(),
+                        cx.processor(|panel, range: std::ops::Range<usize>, window, cx| {
+                            panel.rows()[range]
+                                .iter()
+                                .map(|row| panel.file_row(row, window, cx))
+                                .collect()
+                        }),
+                    )
+                    .size_full()
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                    .track_scroll(scroll.clone());
+                    control!(
+                        "Changes list",
+                        keyboard_scroll_viewport("changes-viewport", scroll, window, cx)
+                            .relative()
+                            .size_full()
+                            .child(list)
+                            .vertical_scrollbar(scroll)
+                    )
                     .flex_1()
                     .min_h_0()
-                    .px_1()
-                    .py_1()
-                    .overflow_y_scroll()
-                    .children(rows.iter().map(|row| self.file_row(row, window, cx)))
-                    .into_any_element(),
+                    .m_1()
+                    .into_any_element()
+                }
             })
     }
 }
