@@ -17,7 +17,8 @@ def check(binary):
         checkout = root / "checkout"
         state = root / "state"
         name = "answer [v1].txt"
-        committed_name = "branch-only.txt"
+        committed_name = "branch-only.md"
+        committed_markdown = "# Committed on topic\n\nKeep **source** intact.\n"
         subprocess.run(["git", "init", "-q", "-b", "main", checkout], check=True)
 
         def git(*args):
@@ -167,7 +168,7 @@ def check(binary):
         assert (checkout / markdown_path).read_text() == edited_markdown
         assert (checkout / "fixture-tree/nested/entry.txt").read_text() == "Fixture attachment\n"
         assert (checkout / name).read_text() == "42\n"
-        (checkout / committed_name).write_text("committed on topic\n")
+        (checkout / committed_name).write_text(committed_markdown)
         git("add", "--", name, committed_name)
         git("commit", "-qm", "Produce the expected answer")
         (checkout / name).write_text("staged change\n")
@@ -233,8 +234,11 @@ def check(binary):
             {"absent": f"Revert/{committed_name}"},
             {"click": f"Open in/{committed_name}"}, {"see": f"Open VS Code/{committed_name}"},
             {"absent": f"Open VS Code/{name}"}, {"key": "escape"},
-            {"click": f"Changed/{committed_name}"}, {"see": "Diff line/+committed on topic"},
+            {"click": f"Changed/{committed_name}"}, {"see": "Diff line/+# Committed on topic"},
             {"absent": "Revert document"}, {"click": "Copy document"}, {"clipboard_text": expected_patch},
+            {"click": "Document mode/Preview"}, {"see": "Rendered Markdown"},
+            {"absent": "Diff line/+# Committed on topic"},
+            {"click": "Copy document"}, {"clipboard_text": committed_markdown},
             {"key": "cmd-w"}, {"see": "Message"},
             {"click": f"Open in/{name}"}, {"see": f"Open VS Code/{name}"},
             {"absent": f"Open VS Code/{committed_name}"}, {"key": "escape"},
@@ -277,6 +281,7 @@ def check(binary):
             {"click": "Copy document"}, {"clipboard_text": "keep this\n"},
             {"click": "Raw editor"}, {"key": "cmd-a"}, {"type": "edited from the diff"},
             {"click": "Save document"}, {"file_size": [str(checkout / other_name), len("edited from the diff")]},
+            {"click": "Document mode/Preview"}, {"see": "Document text/edited from the diff"},
             {"click": "Document mode/Unified"}, {"see": "Diff line/+edited from the diff"},
             {"click": "Revert document"}, {"see": "Confirm file revert"}, {"click": "Cancel file revert"},
             {"see": "Diff line/+edited from the diff"}, {"click": "Revert document"}, {"click": "Confirm file revert"},

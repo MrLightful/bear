@@ -68,12 +68,25 @@ impl Document {
         }
     }
 
-    fn read(&self, root: &Path, refresh: bool) -> Result<Loaded> {
-        let row = match self {
-            Self::File(path) => return Ok(Loaded::file(read_file(root, path)?)),
-            Self::Diff(row) => row,
-            Self::Trace(_) => unreachable!("traces are read from the conversation"),
-        };
+    fn initial_mode(&self) -> DocumentMode {
+        match self {
+            Self::Diff(_) => DocumentMode::Unified,
+            Self::File(_) | Self::Trace(_) => DocumentMode::Preview,
+        }
+    }
+
+    fn read(&self, root: &Path, refresh: bool) -> Loaded {
+        let path = self.path().expect("traces are read from the conversation");
+        Loaded {
+            diff: match self {
+                Self::Diff(row) => Some(Self::read_diff(root, row, refresh)),
+                _ => None,
+            },
+            file: read_file(root, path),
+        }
+    }
+
+    fn read_diff(root: &Path, row: &ReviewRow, refresh: bool) -> Result<LoadedDiff> {
         let row = if refresh {
             let snapshot = git::changed_files(root, row.scope)?;
             snapshot
@@ -90,7 +103,11 @@ impl Document {
             Some(row.clone())
         };
         let Some(row) = row else {
-            return Ok(Loaded::file(Preview::Notice(NO_DIFF)));
+            return Ok(LoadedDiff {
+                patch: Preview::Notice(NO_DIFF),
+                review: None,
+                revert: None,
+            });
         };
         let revert = row
             .file
@@ -99,13 +116,13 @@ impl Document {
             .flatten()
             .map(|target| Arc::from([target]));
         let bytes = git::file_patch(root, &row.base, &row.head, &row.file, TEXT_LIMIT + 1)?;
-        let preview = if bytes.is_empty() {
+        let patch = if bytes.is_empty() {
             Preview::Notice(NO_DIFF)
         } else {
             Preview::text(bytes, Some(&row.file.path), false)
         };
-        Ok(Loaded {
-            preview,
+        Ok(LoadedDiff {
+            patch,
             review: Some(row),
             revert,
         })
@@ -171,11 +188,12 @@ pub(super) struct DocumentTab {
     preview: bool,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    patch_scroll: ScrollHandle,
     pending_heading: RefCell<Option<String>>,
     diff_scroll: UniformListScrollHandle,
     mode: DocumentMode,
     copied_at: Option<Instant>,
-    loaded: Option<Result<Loaded>>,
+    loaded: Option<Loaded>,
     revert_error: Option<String>,
     load: Option<Task<()>>,
     trace: Option<TraceContent>,
@@ -187,28 +205,23 @@ struct TraceContent {
     _reader: Option<Task<()>>,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum DocumentMode {
-    #[default]
     Preview,
+    Unified,
     Patch,
     Raw,
 }
 
 struct Loaded {
-    preview: Preview,
-    review: Option<ReviewRow>,
-    revert: Option<Arc<[PreparedRevert]>>,
+    file: Result<Preview>,
+    diff: Option<Result<LoadedDiff>>,
 }
 
-impl Loaded {
-    fn file(preview: Preview) -> Self {
-        Self {
-            preview,
-            review: None,
-            revert: None,
-        }
-    }
+struct LoadedDiff {
+    patch: Preview,
+    review: Option<ReviewRow>,
+    revert: Option<Arc<[PreparedRevert]>>,
 }
 
 enum Formatted {
@@ -438,9 +451,10 @@ impl Desktop {
                     preview,
                     focus: cx.focus_handle().tab_stop(true),
                     scroll: ScrollHandle::new(),
+                    patch_scroll: ScrollHandle::new(),
                     diff_scroll: UniformListScrollHandle::new(),
                     pending_heading: RefCell::default(),
-                    mode: DocumentMode::default(),
+                    mode: document.initial_mode(),
                     copied_at: None,
                     loaded: None,
                     revert_error: None,
@@ -949,15 +963,20 @@ impl DocumentTab {
         let scope = self.document.comparison();
         let theme = cx.theme();
         let (border, muted, foreground) = (theme.border, theme.muted_foreground, theme.foreground);
-        let loaded = match &self.loaded {
-            Some(Ok(loaded)) => Some(loaded),
-            _ => None,
+        let diff = self.loaded.as_ref().and_then(|loaded| loaded.diff.as_ref());
+        let review = diff.and_then(|diff| diff.as_ref().ok());
+        let viewing_diff = matches!(self.mode, DocumentMode::Unified | DocumentMode::Patch);
+        let content_preview = if viewing_diff {
+            diff.map(|diff| diff.as_ref().map(|diff| &diff.patch))
+        } else {
+            self.loaded.as_ref().map(|loaded| loaded.file.as_ref())
         };
-        let preview = loaded.map(|loaded| &loaded.preview);
+        let preview = content_preview.and_then(Result::ok);
         let modes: &[(DocumentMode, &str)] = if scope.is_some() {
             &[
-                (DocumentMode::Preview, "Unified"),
+                (DocumentMode::Unified, "Unified"),
                 (DocumentMode::Patch, "Patch"),
+                (DocumentMode::Preview, "Preview"),
                 (DocumentMode::Raw, "Raw"),
             ]
         } else {
@@ -972,9 +991,9 @@ impl DocumentTab {
         let copy = if raw {
             draft.map(|draft| ("Copy file", CopyContent::Draft(draft.input.clone())))
         } else {
-            preview.and_then(|preview| preview.copy_content(scope.is_some()))
+            preview.and_then(|preview| preview.copy_content(viewing_diff))
         };
-        let revert = loaded.and_then(|loaded| loaded.review.as_ref().zip(loaded.revert.as_ref()));
+        let revert = review.and_then(|diff| diff.review.as_ref().zip(diff.revert.as_ref()));
         let truncated = matches!(
             preview,
             Some(Preview::Text {
@@ -990,9 +1009,9 @@ impl DocumentTab {
                 )
                 .into_any_element()
         } else {
-            match &self.loaded {
+            match content_preview {
                 None => hint(
-                    if scope.is_some() {
+                    if viewing_diff {
                         "Reading diff…"
                     } else {
                         "Reading file…"
@@ -1004,7 +1023,7 @@ impl DocumentTab {
                 Some(Err(error)) => hint(format!("Could not open {path_label}. {error:#}"), cx)
                     .p_4()
                     .into_any_element(),
-                Some(Ok(loaded)) => self.render_preview(&loaded.preview, window, cx),
+                Some(Ok(preview)) => self.render_preview(preview, window, cx),
             }
         };
         v_flex()
@@ -1121,7 +1140,7 @@ impl DocumentTab {
                         .border_color(border)
                         .child(hint(scope, cx).text_xs().flex_1())
                         .when_some(
-                            loaded.and_then(|loaded| loaded.review.as_ref()),
+                            review.and_then(|diff| diff.review.as_ref()),
                             |summary, row| summary.child(line_counts(row.file.lines, cx)),
                         ),
                 )
@@ -1229,6 +1248,7 @@ impl DocumentTab {
                                 .on_click(cx.listener(move |desktop, _, window, cx| {
                                     if let Some(tab) = desktop.active_document_mut(id) {
                                         tab.mode = mode;
+                                        tab.copied_at = None;
                                         desktop.focus_workspace(window, cx);
                                         desktop.open_active_editor(window, cx);
                                         cx.notify();
@@ -1250,7 +1270,7 @@ impl DocumentTab {
             Preview::Text {
                 formatted: Some(Formatted::Diff(diff)),
                 ..
-            } if self.mode == DocumentMode::Preview => {
+            } if self.mode == DocumentMode::Unified => {
                 return Diff::render(diff, &self.diff_scroll, window, cx).into_any_element();
             }
             Preview::Text {
@@ -1293,7 +1313,11 @@ impl DocumentTab {
                     StyledText::new(text.clone())
                 )),
         };
-        let scroll = &self.scroll;
+        let scroll = if self.mode == DocumentMode::Patch {
+            &self.patch_scroll
+        } else {
+            &self.scroll
+        };
         div()
             .relative()
             .size_full()
