@@ -1,8 +1,9 @@
 use super::ssh::{Connection, SavedMachine};
 use crate::{
     conversation::{
+        conversation_error_response,
         markdown_view::{ResponseRenderContext, contains_mermaid_fence, prose},
-        conversation_error_response, permission_card,
+        permission_card,
     },
     ui::{field, heading, hint, label},
 };
@@ -849,7 +850,8 @@ impl Render for RemoteProject {
                                                 .as_ref()
                                                 .and_then(|run| run.error.as_deref()),
                                             |history, error| {
-                                                history.child(conversation_error_response(error, cx))
+                                                history
+                                                    .child(conversation_error_response(error, cx))
                                             },
                                         )
                                         .children(self.request_feedback(cx))

@@ -723,7 +723,8 @@ impl Desktop {
                 if let Some(path) = choice.await? {
                     let save_thread = thread.clone();
                     cx.background_spawn(async move {
-                        let file = runtime.read_attachment_file(&save_thread, &message, position)?;
+                        let file =
+                            runtime.read_attachment_file(&save_thread, &message, position)?;
                         let directory = path.parent().context("Missing save directory")?;
                         let mut output = tempfile::NamedTempFile::new_in(directory)?;
                         output.write_all(&file.bytes)?;
@@ -1004,11 +1005,15 @@ impl Desktop {
                                     );
                                 });
                             }
-                            Err(error) => view.record_error(thread.as_ref(), error.to_string(), None, cx),
+                            Err(error) => {
+                                view.record_error(thread.as_ref(), error.to_string(), None, cx)
+                            }
                         }
                     }
                     Ok(_) => {}
-                    Err(error) => view.record_error(thread.as_ref(), format!("{error:#}"), None, cx),
+                    Err(error) => {
+                        view.record_error(thread.as_ref(), format!("{error:#}"), None, cx)
+                    }
                 }
                 cx.notify();
             });
