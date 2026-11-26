@@ -329,7 +329,7 @@ exec "$MODEL_FIXTURE" "$@"
         *launch_thread(checkout, "Models check"),
         {"click": "model-automatic"},
         {"above": ["model-option/fixture-fast", "model-option/fixture-deep"]},
-        {"click": "model-option-automatic"},
+        {"key": "escape"},
         *open_provider,
         {"absent": "Launch arguments"}, {"absent": "CLI executable"},
         {"click": "Models"}, {"absent": "model-enabled/fixture-fast"}, {"click": "Models"},
@@ -339,7 +339,7 @@ exec "$MODEL_FIXTURE" "$@"
         {"click": "model-enabled/fixture-deep"}, {"absent": "model-up/fixture-deep"},
         {"click": "Back to Settings"}, {"click": "Back to workspace"}, {"click": "model-automatic"},
         {"see": "model-option/fixture-fast"}, {"absent": "model-option/fixture-deep"},
-        {"click": "model-option-automatic"},
+        {"key": "escape"},
     ], env)
     run_window(executable, state, [
         {"resize": [1120, 840]},
@@ -358,7 +358,7 @@ exec "$MODEL_FIXTURE" "$@"
         {"click": "thread/Models check"},
         {"click": "model-automatic"},
         {"above": ["model-option/fixture-deep", "model-option/fixture-fast"]},
-        {"click": "model-option-automatic"},
+        {"key": "escape"},
     ], env)
     prefs = state / "preferences.json"
     preferences = json.loads(prefs.read_text())

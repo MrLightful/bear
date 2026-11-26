@@ -70,13 +70,6 @@ impl Settings {
         catalog: Entity<ProviderCatalog>,
         cx: &mut Context<Self>,
     ) {
-        if self.page == super::Page::DefaultModels {
-            let subscription = cx.observe(&catalog, |_, _, cx| cx.notify());
-            self.preset_catalogs
-                .insert(id.as_str().to_owned(), (catalog, subscription));
-            cx.notify();
-            return;
-        }
         if !self.provider_details_open() || self.providers.selected != *id {
             return;
         }

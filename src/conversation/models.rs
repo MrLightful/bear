@@ -1,16 +1,17 @@
+mod picker;
+mod presentation;
+
 use super::*;
-use crate::settings::{ModelPreferences, ModelPreset, STANDARD_SPEED};
+use crate::settings::{
+    ModelFavorite, ModelPreferences, STANDARD_SPEED, is_fast_tier, provider_logo,
+};
 use gpui_component::{
-    IconName, IndexPath, Sizable,
-    list::{List, ListDelegate, ListEvent, ListItem, ListState},
-    popover::Popover,
-    switch::Switch,
+    IndexPath,
+    list::{ListDelegate, ListEvent, ListItem, ListState},
+    menu::PopupMenu,
 };
 use huggler::{ModelDetails, ProviderReport};
-
-const AUTOMATIC: &str = "Automatic";
-const PICKER_WIDTH: Pixels = px(300.);
-const OPTION_PADDING: Pixels = px(12.);
+use presentation::{display_name, model_logo};
 
 pub(crate) struct ProviderCatalog {
     instance: ProviderInstanceId,
@@ -29,13 +30,6 @@ impl ProviderCatalog {
 
     pub(crate) fn report(&self) -> Option<&ProviderReport> {
         self.result.as_ref()?.as_ref().ok()
-    }
-
-    fn supports_preset(&self, preset: &ModelPreset) -> bool {
-        !self.login_required()
-            && self
-                .report()
-                .is_none_or(|report| preset.supported_by(report))
     }
 
     pub(super) fn status(&self) -> String {
@@ -77,22 +71,29 @@ impl ProviderCatalog {
 
 #[derive(Clone, PartialEq, Eq)]
 enum ModelChoice {
-    Preset(usize, ModelPreset),
-    Model(Option<String>),
+    Favorite(ModelFavorite),
+    Model(String),
 }
 
 pub(super) struct Models {
+    source: ProviderInstanceId,
+    desktop: WeakEntity<Desktop>,
+    providers: HashMap<ProviderInstanceId, (Provider, String)>,
+    allow_provider_switch: bool,
     catalog: Option<Entity<ProviderCatalog>>,
     current: Option<String>,
     options: ModelOptions,
-    presets: Vec<(usize, ModelPreset)>,
-    preset_catalogs: HashMap<ProviderInstanceId, Entity<ProviderCatalog>>,
+    favorites_open: bool,
+    reasoning_menu: Option<Entity<PopupMenu>>,
+    saved: Vec<ModelFavorite>,
+    favorite_preferences: HashMap<ProviderInstanceId, ModelPreferences>,
+    catalogs: HashMap<ProviderInstanceId, Entity<ProviderCatalog>>,
     query: String,
     matches: Vec<ModelChoice>,
     preferences: ModelPreferences,
 }
 
-pub(crate) fn effort_label(effort: &str) -> String {
+pub(super) fn effort_label(effort: &str) -> String {
     match effort {
         "xhigh" => "Extra high".into(),
         _ => {
@@ -118,8 +119,56 @@ fn model_details<'a>(
     }
 }
 
+fn reported_default_model(report: Option<&ProviderReport>) -> Option<&str> {
+    report?
+        .model_details
+        .iter()
+        .find_map(|(id, details)| details.is_default.then_some(id.as_str()))
+}
+
 fn model_name<'a>(model: Option<&'a str>, details: Option<&'a ModelDetails>) -> &'a str {
-    details.map_or_else(|| model.unwrap_or(AUTOMATIC), |details| &details.name)
+    details.map_or_else(|| model.unwrap_or("Choose model"), |details| &details.name)
+}
+
+fn effective_effort<'a>(
+    options: &'a ModelOptions,
+    details: Option<&'a ModelDetails>,
+) -> Option<&'a str> {
+    options
+        .effort
+        .as_deref()
+        .or_else(|| details?.default_effort.as_deref())
+}
+
+fn effective_speed<'a>(
+    options: &'a ModelOptions,
+    details: Option<&'a ModelDetails>,
+) -> Option<&'a str> {
+    options
+        .service_tier
+        .as_deref()
+        .or_else(|| details?.default_service_tier.as_deref())
+}
+
+fn model_snapshot(options: &ModelOptions, details: Option<&ModelDetails>) -> ModelOptions {
+    let mut snapshot = options.clone();
+    if let Some(details) = details {
+        if snapshot.effort.is_none() {
+            snapshot.effort = effective_effort(options, Some(details))
+                .filter(|effort| details.efforts.iter().any(|supported| supported == effort))
+                .map(str::to_owned);
+        }
+        if let Some(fast_tier) = &details.fast_tier {
+            snapshot.service_tier = Some(
+                if effective_speed(options, Some(details)).is_some_and(is_fast_tier) {
+                    fast_tier.clone()
+                } else {
+                    STANDARD_SPEED.into()
+                },
+            );
+        }
+    }
+    snapshot
 }
 
 impl Models {
@@ -127,43 +176,102 @@ impl Models {
         self.catalog.as_ref()?.read(cx).report()
     }
 
-    fn preset_available(&self, preset: &ModelPreset, cx: &App) -> bool {
-        self.preset_catalogs
-            .get(&preset.provider)
-            .is_none_or(|catalog| catalog.read(cx).supports_preset(preset))
+    fn driver(&self, provider: &ProviderInstanceId) -> Option<Provider> {
+        self.providers.get(provider).map(|(driver, _)| *driver)
+    }
+
+    fn provider_label<'a>(&'a self, provider: &'a ProviderInstanceId) -> &'a str {
+        self.providers
+            .get(provider)
+            .map_or(provider.as_str(), |(_, label)| label)
+    }
+
+    fn favorite_report<'a>(
+        &self,
+        favorite: &ModelFavorite,
+        cx: &'a App,
+    ) -> Option<&'a ProviderReport> {
+        self.catalogs.get(&favorite.provider)?.read(cx).report()
+    }
+
+    fn favorite_status(&self, favorite: &ModelFavorite, cx: &App) -> Option<&'static str> {
+        if !self.allow_provider_switch && self.source != favorite.provider {
+            return Some("New chat only");
+        }
+        if self
+            .favorite_preferences
+            .get(&favorite.provider)
+            .is_some_and(|prefs| !prefs.enabled(&favorite.model))
+        {
+            return Some("Hidden in Settings");
+        }
+        if self
+            .catalogs
+            .get(&favorite.provider)
+            .is_some_and(|catalog| catalog.read(cx).loading())
+        {
+            return Some("Checking…");
+        }
+        if !self
+            .favorite_report(favorite, cx)
+            .is_some_and(|report| favorite.supported_by(report))
+        {
+            return Some("Unavailable");
+        }
+        None
+    }
+
+    fn favorite_name(&self, favorite: &ModelFavorite, cx: &App) -> String {
+        let report = self.favorite_report(favorite, cx);
+        let details = model_details(report, Some(&favorite.model));
+        display_name(
+            self.driver(&favorite.provider),
+            Some(&favorite.model),
+            model_name(Some(&favorite.name), details),
+        )
+    }
+
+    fn model_label(&self, model: &str, cx: &App) -> String {
+        display_name(
+            self.driver(&self.source),
+            Some(model),
+            model_name(Some(model), model_details(self.report(cx), Some(model))),
+        )
     }
 
     fn filter(&mut self, cx: &App) {
-        let report = self.report(cx);
-        let models = report.map(|report| self.preferences.ordered(&report.models));
-        let presets = self
-            .presets
-            .iter()
-            .filter(|(index, preset)| {
-                self.preset_available(preset, cx)
-                    && format!("preset {} {} {}", index + 1, preset.name, preset.model)
+        if self.favorites_open {
+            self.matches = self
+                .saved
+                .iter()
+                .filter(|favorite| {
+                    let name = self.favorite_name(favorite, cx);
+                    let provider = self.provider_label(&favorite.provider);
+                    format!("{name} {} {} {provider}", favorite.name, favorite.model)
                         .to_lowercase()
                         .contains(&self.query)
-            })
-            .map(|(index, preset)| ModelChoice::Preset(*index, preset.clone()));
-        let choices = std::iter::once(None)
-            .take(usize::from(self.catalog.is_some()))
-            .chain(
-                models
-                    .into_iter()
-                    .flatten()
-                    .filter(|id| self.preferences.enabled(id))
-                    .map(Some),
-            )
+                })
+                .cloned()
+                .map(ModelChoice::Favorite)
+                .collect();
+            return;
+        }
+        let report = self.report(cx);
+        let models = report.map(|report| self.preferences.ordered(&report.models));
+        let choices = models
+            .into_iter()
+            .flatten()
+            .filter(|id| self.preferences.enabled(id))
             .filter(|id| {
-                model_name(*id, model_details(report, *id))
+                let name = model_name(Some(id), model_details(report, Some(id)));
+                self.model_label(id, cx)
                     .to_lowercase()
                     .contains(&self.query)
-                    || id.is_some_and(|id| id.to_lowercase().contains(&self.query))
-                    || (id.is_none() && "default".contains(&self.query))
+                    || name.to_lowercase().contains(&self.query)
+                    || id.to_lowercase().contains(&self.query)
             })
-            .map(|id| ModelChoice::Model(id.map(str::to_owned)));
-        self.matches = presets.chain(choices).collect();
+            .map(|id| ModelChoice::Model(id.to_owned()));
+        self.matches = choices.collect();
     }
 }
 
@@ -182,73 +290,155 @@ impl ListDelegate for Models {
     ) -> Option<ListItem> {
         let choice = match self.matches.get(ix.row)? {
             ModelChoice::Model(choice) => choice,
-            ModelChoice::Preset(index, preset) => {
-                let effort = preset.options.effort.as_deref().map(effort_label);
-                let speed = preset.options.service_tier.as_deref();
-                let summary = match (effort, speed) {
-                    (Some(effort), Some(speed)) => {
-                        format!("{effort} · {}", ModelPreset::speed_label(Some(speed)))
-                    }
-                    (Some(effort), None) => effort,
-                    (None, speed) => ModelPreset::speed_label(speed).to_owned(),
-                };
-                let slot = format!("Preset {}", index + 1);
-                let name = preset.name.clone();
+            ModelChoice::Favorite(favorite) => {
+                let driver = self.driver(&favorite.provider);
+                let report = self.favorite_report(favorite, cx);
+                let details = model_details(report, Some(&favorite.model));
+                let effort = effective_effort(&favorite.options, details).map(effort_label);
+                let speed = effective_speed(&favorite.options, details)
+                    .map(ModelFavorite::speed_label)
+                    .or_else(|| details?.fast_tier.as_ref().map(|_| "Standard"));
+                let follows_provider = details.is_some_and(|details| {
+                    (favorite.options.effort.is_none() && details.default_effort.is_some())
+                        || (favorite.options.service_tier.is_none() && details.fast_tier.is_some())
+                });
+                let summary = [effort.as_deref(), speed]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let status = self.favorite_status(favorite, cx);
+                let name = self.favorite_name(favorite, cx);
+                let provider = self.provider_label(&favorite.provider).to_owned();
+                let exact_favorite = self.saved.iter().any(|saved| {
+                    saved.provider == favorite.provider
+                        && saved.model == favorite.model
+                        && saved.options == self.options
+                });
+                let current = status.is_none()
+                    && self.source == favorite.provider
+                    && self.current.as_deref() == Some(favorite.model.as_str())
+                    && if exact_favorite {
+                        self.options == favorite.options
+                    } else {
+                        model_snapshot(&self.options, details) == favorite.options
+                    };
+                #[cfg(all(feature = "qualification", target_os = "macos"))]
+                let model = favorite.model.clone();
+                let favorite = favorite.clone();
+                let desktop = self.desktop.clone();
+                #[cfg(all(feature = "qualification", target_os = "macos"))]
+                let remove_key = format!(
+                    "remove-model-favorite/{}/{model}/{summary}",
+                    favorite.provider
+                );
                 return Some(
                     ListItem::new(ix.row)
+                        .h(px(46.))
+                        .rounded_md()
+                        .text_sm()
+                        .disabled(status.is_some())
                         .check_icon(IconName::Check)
-                        .confirmed(
-                            self.catalog.as_ref().is_some_and(|catalog| {
-                                catalog.read(cx).instance == preset.provider
-                            }) && self.current.as_deref() == Some(preset.model.as_str())
-                                && self.options == preset.options,
-                        )
+                        .confirmed(current)
                         .child(control!(
-                            format!("model-preset/{}", index + 1),
+                            format!(
+                                "{}/{model}/{summary}",
+                                if status.is_none() {
+                                    "model-favorite"
+                                } else {
+                                    "unavailable-model-favorite"
+                                }
+                            ),
                             h_flex()
                                 .gap_2()
                                 .min_w_0()
-                                .child(hint(slot, cx).flex_shrink_0())
-                                .child(div().flex_1().min_w_0().truncate().child(name))
-                                .child(hint(summary, cx).flex_shrink_0())
-                        )),
+                                .child(model_logo(driver, Some(&favorite.model), cx))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(div().truncate().child(name.clone()))
+                                        .child(hint(provider, cx).truncate())
+                                )
+                                .child(
+                                    v_flex()
+                                        .items_end()
+                                        .min_w_0()
+                                        .when(!summary.is_empty(), |column| column
+                                            .child(hint(summary, cx).truncate()))
+                                        .when_some(
+                                            status
+                                                .or(follows_provider.then_some("Follows provider")),
+                                            |column, status| column.child(hint(status, cx))
+                                        )
+                                )
+                        ))
+                        .suffix(move |_, _| {
+                            control!(
+                                remove_key.clone(),
+                                Button::new("remove-model-favorite")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .tooltip(format!("Remove {name} from Favorites"))
+                                    .on_click({
+                                        let desktop = desktop.clone();
+                                        let favorite = favorite.clone();
+                                        move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            let _ = desktop.update(cx, |view, cx| {
+                                                view.set_model_favorite(
+                                                    favorite.clone(),
+                                                    false,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    })
+                            )
+                        }),
                 );
             }
         };
-        let details = model_details(self.report(cx), choice.as_deref());
-        let name = model_name(choice.as_deref(), details);
+        let report = self.report(cx);
+        let details = model_details(report, Some(choice));
+        let driver = self.driver(&self.source);
+        let name = self.model_label(choice, cx);
         #[cfg(all(feature = "qualification", target_os = "macos"))]
-        let control_key = choice.as_ref().map_or_else(
-            || "model-option-automatic".into(),
-            |id| format!("model-option/{id}"),
-        );
-        let effort = if self.current == *choice {
-            self.options.effort.as_deref()
+        let control_key = format!("model-option/{choice}");
+        let selected = self
+            .current
+            .as_deref()
+            .or_else(|| reported_default_model(report))
+            == Some(choice);
+        let effort = if selected {
+            effective_effort(&self.options, details)
         } else {
-            None
+            details.and_then(|details| details.default_effort.as_deref())
         };
-        let effort = effort.or_else(|| details?.default_effort.as_deref());
         Some(
             ListItem::new(ix.row)
+                .h(px(32.))
+                .rounded_md()
+                .text_sm()
                 .check_icon(IconName::Check)
-                .confirmed(self.current == *choice)
+                .confirmed(selected)
                 .child(control!(
                     control_key.clone(),
                     h_flex()
                         .gap_2()
                         .min_w_0()
+                        .child(model_logo(driver, Some(choice), cx))
                         .child(
                             control!(
                                 format!("{control_key}/name/{name}"),
-                                div().truncate().child(name.to_owned())
+                                div().truncate().child(name)
                             )
                             .min_w_0()
                         )
                         .when_some(effort, |row, effort| {
                             row.child(hint(effort_label(effort), cx).flex_shrink_0())
-                        })
-                        .when(choice.is_none() && details.is_some(), |row| {
-                            row.child(hint("Default", cx).flex_shrink_0())
                         })
                 )),
         )
@@ -260,10 +450,14 @@ impl ListDelegate for Models {
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
         hint(
-            if self.catalog.is_some() {
+            if !self.query.is_empty() {
                 "No matching models"
+            } else if self.favorites_open {
+                "Save a model with the star below to find it here."
+            } else if self.catalog.is_some() {
+                "No models to show"
             } else {
-                "No providers configured"
+                "Choose a provider to see its models."
             },
             cx,
         )
@@ -291,31 +485,6 @@ impl ListDelegate for Models {
 }
 
 impl Desktop {
-    pub(super) fn apply_launch_model_default(&mut self, cx: &App) {
-        let (_, checkout) = self.picker_source(cx);
-        let preset = self
-            .settings
-            .read(cx)
-            .enabled_presets()
-            .find(|(_, preset)| {
-                self.configured_providers(cx)
-                    .any(|provider| provider.id == preset.provider)
-                    && self
-                        .model_catalogs
-                        .get(&(preset.provider.clone(), checkout.clone()))
-                        .is_none_or(|catalog| catalog.read(cx).supports_preset(preset))
-            });
-        if let Some((_, preset)) = preset {
-            self.instance.clone_from(&preset.provider);
-            self.launch_model = Some(preset.model.clone());
-            self.launch_model_options.clone_from(&preset.options);
-        } else {
-            self.instance = Provider::Codex.key().into();
-            self.launch_model = None;
-            self.launch_model_options = ModelOptions::default();
-        }
-    }
-
     pub(super) fn model_source(&self, cx: &App) -> (ProviderInstanceId, PathBuf) {
         match &self.current {
             Some(thread) => (
@@ -395,19 +564,7 @@ impl Desktop {
             catalog.load(self.runtime.clone(), cx);
             catalog
         });
-        cx.observe(&catalog, |view, catalog, cx| {
-            let state = catalog.read(cx);
-            if view.current.is_none()
-                && !view.launch_model_overridden
-                && state.result.is_some()
-                && view.picker_source(cx) == (state.instance.clone(), state.checkout.clone())
-            {
-                view.apply_launch_model_default(cx);
-                view.preload_models(cx);
-            }
-            cx.notify();
-        })
-        .detach();
+        cx.observe(&catalog, |_, _, cx| cx.notify()).detach();
         self.model_catalogs.insert(source, catalog.clone());
         cx.notify();
         catalog
@@ -418,331 +575,6 @@ impl Desktop {
             Some(thread) => (thread.model.as_deref(), &thread.model_options),
             None => (self.launch_model.as_deref(), &self.launch_model_options),
         }
-    }
-
-    pub(super) fn model_control(&self, cx: &Context<Self>) -> Div {
-        let (model, options) = self.model_selection();
-        let source = self.picker_source(cx);
-        let catalog = self
-            .model_catalogs
-            .get(&source)
-            .map(|catalog| catalog.read(cx));
-        let details = model_details(catalog.and_then(ProviderCatalog::report), model);
-        let effort = options
-            .effort
-            .as_deref()
-            .or_else(|| details?.default_effort.as_deref());
-        let model_label = model.map(|id| {
-            if self.runtime.provider_instances().any(|provider| {
-                provider.id == source.0
-                    && matches!(provider.driver, Provider::OpenCode | Provider::Pi)
-            }) {
-                id.split_once('/').map_or(id, |(_, name)| name)
-            } else {
-                id
-            }
-        });
-        let name = model_name(model_label, details);
-        let trigger = Button::new("choose-model")
-            .small()
-            .ghost()
-            .dropdown_caret(true)
-            .tooltip("Choose model or preset")
-            .child(
-                h_flex()
-                    .gap_1()
-                    .min_w_0()
-                    .child(div().max_w(px(176.)).truncate().child(name.to_owned()))
-                    .when_some(effort, |row, effort| {
-                        row.child(hint(effort_label(effort), cx).flex_shrink_0())
-                    }),
-            );
-        let picker = Popover::new("model-picker")
-            .anchor(Corner::BottomLeft)
-            .trigger(trigger)
-            .open(self.model_picker.is_some())
-            .on_open_change(cx.listener(|view, open, window, cx| {
-                if *open {
-                    view.open_models(window, cx);
-                } else {
-                    let picker = view.model_picker.take();
-                    view.show_model_efforts = false;
-                    // The list handles Escape and returns focus to the composer.
-                    // The setup-only popover has no list to handle it.
-                    if picker.is_some_and(|list| {
-                        list.read(cx).delegate().catalog.is_none()
-                            && list.read(cx).delegate().presets.is_empty()
-                    }) {
-                        view.focus_workspace(window, cx);
-                    }
-                    cx.notify();
-                }
-            }));
-        let picker = if let Some(list) = &self.model_picker {
-            let models = list.read(cx).delegate();
-            let configured: Vec<_> = self.configured_providers(cx).collect();
-            let active_configured = configured.iter().any(|provider| provider.id == source.0);
-            let provider_choices = configured.iter().map(|instance| {
-                let id = instance.id.clone();
-                let name = self.runtime.output().provider_label(id.as_str()).to_owned();
-                control!(
-                    format!("provider/{name}"),
-                    Button::new(SharedString::from(format!("provider-{id}")))
-                        .small()
-                        .ghost()
-                        .selected(id == source.0)
-                        .label(name)
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            if id != view.instance {
-                                view.choose_provider(&id, cx);
-                                view.open_models(window, cx);
-                            }
-                        }))
-                )
-            });
-            let mut content = v_flex().w(PICKER_WIDTH).gap_1();
-            if self.current.is_none() {
-                content = content.child(
-                    div()
-                        .id("model-picker-providers")
-                        .max_h(px(96.))
-                        .overflow_y_scroll()
-                        .child(h_flex().gap_1().flex_wrap().children(provider_choices)),
-                );
-            }
-            let instance = source.0;
-            let edit = control!(
-                "Edit",
-                Button::new("edit-provider-settings")
-                    .small()
-                    .ghost()
-                    .icon(IconName::Settings)
-                    .tooltip("Edit provider settings")
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        view.open_settings(SettingsTarget::Provider(&instance), window, cx);
-                    }))
-            )
-            .flex_shrink_0();
-            let edit_presets = control!(
-                "Edit default models",
-                Button::new("edit-default-models")
-                    .small()
-                    .ghost()
-                    .label("Default Models")
-                    .tooltip("Edit default models")
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.model_picker = None;
-                        view.open_settings(SettingsTarget::DefaultModels, window, cx);
-                    }))
-            );
-            let (message, retry) = match (active_configured, catalog.map(|catalog| &catalog.result))
-            {
-                (false, _) if self.current.is_none() && !configured.is_empty() => {
-                    (Some("Choose a provider to load models.".into()), false)
-                }
-                (false, _) => (Some("Connect a provider in Settings.".into()), false),
-                (_, None | Some(None)) => (Some("Loading models…".into()), false),
-                (_, Some(Some(Err(error)))) => (Some(error.to_string()), true),
-                (_, Some(Some(Ok(report)))) if report.models.is_empty() => {
-                    (Some("This provider listed no models.".into()), true)
-                }
-                _ => (None, false),
-            };
-            let status = message.map(|message| {
-                h_flex()
-                    .gap_2()
-                    .px_1()
-                    .justify_between()
-                    .child(control!(
-                        format!("model-status/{message}"),
-                        hint(message, cx).min_w_0()
-                    ))
-                    .when(retry, |row| {
-                        row.child(control!(
-                            "Retry models",
-                            Button::new("retry-models")
-                                .small()
-                                .ghost()
-                                .label("Retry")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.catalog_for(view.picker_source(cx), true, cx);
-                                }))
-                        ))
-                    })
-            });
-            if active_configured || !models.presets.is_empty() {
-                let max_height = if models.presets.is_empty() {
-                    168.
-                } else {
-                    228.
-                };
-                let height = (models.matches.len().max(1) as f32 * 32. + 36.).min(max_height);
-                content = content
-                    .child(
-                        h_flex()
-                            .items_start()
-                            .gap_1()
-                            .child(
-                                control!(
-                                    "Model search and results",
-                                    List::new(list)
-                                        .search_placeholder("Search models")
-                                        .h(px(height))
-                                )
-                                .flex_1()
-                                .min_w_0(),
-                            )
-                            .child(edit.mt_1()),
-                    )
-                    .children(status);
-            } else {
-                content = content.child(
-                    h_flex()
-                        .gap_1()
-                        .child(v_flex().flex_1().min_w_0().children(status))
-                        .child(edit),
-                );
-            }
-            if active_configured
-                && let Some(details) = details
-                && (!details.efforts.is_empty() || details.fast_tier.is_some())
-            {
-                content = content.child(self.model_options(details, options, cx));
-            }
-            picker.child(content.child(h_flex().justify_end().child(edit_presets)))
-        } else {
-            picker
-        };
-        control!(
-            model.map_or_else(|| "model-automatic".into(), |id| format!("model/{id}")),
-            picker
-        )
-    }
-
-    fn model_options(
-        &self,
-        details: &ModelDetails,
-        options: &ModelOptions,
-        cx: &Context<Self>,
-    ) -> Div {
-        let current_effort = options
-            .effort
-            .as_deref()
-            .or(details.default_effort.as_deref());
-        let mut section = v_flex()
-            .gap_1()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .pt_1();
-        if !details.efforts.is_empty() {
-            section = section.child(control!(
-                "Effort",
-                Button::new("model-effort")
-                    .small()
-                    .ghost()
-                    .w_full()
-                    .px(OPTION_PADDING)
-                    .justify_start()
-                    .child(
-                        h_flex()
-                            .w(PICKER_WIDTH - OPTION_PADDING * 2.)
-                            .justify_between()
-                            .gap_2()
-                            .child("Effort")
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(hint(
-                                        current_effort
-                                            .map(effort_label)
-                                            .unwrap_or_else(|| "Default".into()),
-                                        cx
-                                    ))
-                                    .child(
-                                        Icon::new(if self.show_model_efforts {
-                                            IconName::ChevronUp
-                                        } else {
-                                            IconName::ChevronDown
-                                        })
-                                        .size(px(14.))
-                                    )
-                            )
-                    )
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.show_model_efforts = !view.show_model_efforts;
-                        cx.notify();
-                    }))
-            ));
-        }
-        if self.show_model_efforts {
-            let efforts = std::iter::once(None).chain(details.efforts.iter().map(Some));
-            section = section.child(h_flex().flex_wrap().gap_1().children(efforts.map(|effort| {
-                let key = effort.map_or("default", String::as_str);
-                let id = SharedString::from(format!("effort/{key}"));
-                let selected = options.effort.as_ref() == effort;
-                let label =
-                    effort.map_or_else(|| "Use default".into(), |value| effort_label(value));
-                let effort = effort.cloned();
-                control!(
-                    id.clone(),
-                    Button::new(id)
-                        .small()
-                        .outline()
-                        .selected(selected)
-                        .label(label)
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.update_model_options(
-                                |options| options.effort.clone_from(&effort),
-                                cx,
-                            );
-                            view.show_model_efforts = false;
-                            cx.notify();
-                        }))
-                )
-            })));
-        }
-        if let Some(tier) = &details.fast_tier {
-            let speed = options
-                .service_tier
-                .as_deref()
-                .or(details.default_service_tier.as_deref());
-            let enabled = speed.is_some_and(|tier| matches!(tier, "fast" | "priority"));
-            let tier = tier.clone();
-            section = section.child(control!(
-                if enabled {
-                    "Fast mode on"
-                } else {
-                    "Fast mode off"
-                },
-                Button::new("model-speed")
-                    .small()
-                    .ghost()
-                    .w_full()
-                    .px(OPTION_PADDING)
-                    .justify_start()
-                    .child(
-                        h_flex()
-                            .w(PICKER_WIDTH - OPTION_PADDING * 2.)
-                            .justify_between()
-                            .gap_2()
-                            .child("Fast mode")
-                            .child(Switch::new("model-fast-mode").small().checked(enabled))
-                    )
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.update_model_options(
-                            |options| {
-                                options.service_tier = Some(if enabled {
-                                    STANDARD_SPEED.into()
-                                } else {
-                                    tier.clone()
-                                });
-                            },
-                            cx,
-                        );
-                    }))
-            ));
-        }
-        section
     }
 
     fn update_model_options(
@@ -773,7 +605,6 @@ impl Desktop {
                 .and_then(|_| self.refresh());
             self.report(result, cx);
         } else {
-            self.launch_model_overridden = true;
             self.launch_model = model;
             self.launch_model_options = options;
             cx.notify();
@@ -787,46 +618,89 @@ impl Desktop {
         }
     }
 
-    fn open_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_model_efforts = false;
+    fn close_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model_picker.take().is_some() {
+            self.focus_workspace(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn open_models(&mut self, favorites_open: bool, window: &mut Window, cx: &mut Context<Self>) {
         let source = self.picker_source(cx);
-        let configured = self
+        let thread_id = self.current.as_ref().map(|thread| thread.id.clone());
+        let configured: HashSet<_> = self
             .configured_providers(cx)
-            .any(|provider| provider.id == source.0);
-        let catalog = configured.then(|| self.catalog_for(source.clone(), false, cx));
-        let thread_id = self.current.as_ref().map(|t| t.id.clone());
+            .map(|provider| provider.id.clone())
+            .collect();
+        let providers = self
+            .runtime
+            .provider_instances()
+            .map(|provider| {
+                (
+                    provider.id.clone(),
+                    (
+                        provider.driver,
+                        self.runtime
+                            .output()
+                            .provider_label(provider.id.as_str())
+                            .to_owned(),
+                    ),
+                )
+            })
+            .collect();
+        let catalog = configured
+            .contains(&source.0)
+            .then(|| self.catalog_for(source.clone(), false, cx));
         let (current, options) = self.model_selection();
         let current = current.map(str::to_owned);
         let options = options.clone();
-        let presets = self
-            .settings
-            .read(cx)
-            .enabled_presets()
-            .filter(|(_, preset)| {
-                (thread_id.is_none() || preset.provider == source.0)
-                    && self
-                        .configured_providers(cx)
-                        .any(|provider| provider.id == preset.provider)
+        let settings = self.settings.read(cx);
+        let saved = if favorites_open {
+            settings.model_favorites().to_vec()
+        } else {
+            Vec::new()
+        };
+        let preferences = settings.model_preferences(&source.0);
+        let favorite_preferences: HashMap<_, _> = saved
+            .iter()
+            .map(|favorite| {
+                (
+                    favorite.provider.clone(),
+                    settings.model_preferences(&favorite.provider),
+                )
             })
-            .map(|(index, preset)| (index, preset.clone()))
-            .collect::<Vec<_>>();
-        let mut preset_catalogs = HashMap::new();
-        for (_, preset) in &presets {
-            preset_catalogs
-                .entry(preset.provider.clone())
-                .or_insert_with(|| {
-                    self.catalog_for((preset.provider.clone(), source.1.clone()), false, cx)
-                });
-        }
-        let searchable = configured || !presets.is_empty();
-        let preferences = self.settings.read(cx).model_preferences(&source.0);
+            .collect();
+        let checkable: HashSet<_> = saved
+            .iter()
+            .filter(|favorite| {
+                (thread_id.is_none() || favorite.provider == source.0)
+                    && configured.contains(&favorite.provider)
+                    && favorite_preferences[&favorite.provider].enabled(&favorite.model)
+            })
+            .map(|favorite| favorite.provider.clone())
+            .collect();
+        let catalogs = checkable
+            .into_iter()
+            .map(|provider| {
+                let catalog = self.catalog_for((provider.clone(), source.1.clone()), false, cx);
+                (provider, catalog)
+            })
+            .collect();
+        let desktop = cx.weak_entity();
         let list = cx.new(|cx| {
             let mut models = Models {
+                source: source.0.clone(),
+                desktop,
+                providers,
+                allow_provider_switch: thread_id.is_none(),
                 catalog: catalog.clone(),
                 current,
                 options,
-                presets,
-                preset_catalogs,
+                favorites_open,
+                reasoning_menu: None,
+                saved,
+                favorite_preferences,
+                catalogs,
                 query: String::new(),
                 matches: Vec::new(),
                 preferences,
@@ -834,7 +708,7 @@ impl Desktop {
             models.filter(cx);
             let catalogs = catalog.iter().chain(
                 models
-                    .preset_catalogs
+                    .catalogs
                     .values()
                     .filter(|candidate| Some(*candidate) != catalog.as_ref()),
             );
@@ -866,9 +740,7 @@ impl Desktop {
                 return;
             }
             if matches!(event, ListEvent::Cancel) {
-                view.model_picker = None;
-                view.focus_workspace(window, cx);
-                cx.notify();
+                view.close_model_picker(window, cx);
                 return;
             }
             let ListEvent::Confirm(ix) = event else {
@@ -878,36 +750,40 @@ impl Desktop {
             let Some(choice) = models.matches.get(ix.row).cloned() else {
                 return;
             };
-            if let ModelChoice::Preset(_, preset) = &choice
-                && !models.preset_available(preset, cx)
+            if let ModelChoice::Favorite(favorite) = &choice
+                && models.favorite_status(favorite, cx).is_some()
             {
                 return;
             }
             let same_context = view.picker_source(cx) == source
                 && view.current.as_ref().map(|t| &t.id) == thread_id.as_ref();
-            view.model_picker = None;
-            view.focus_workspace(window, cx);
-            cx.notify();
+            let provider_model = reported_default_model(models.report(cx)).map(str::to_owned);
+            view.close_model_picker(window, cx);
             if !same_context {
                 return;
             }
             match choice {
-                ModelChoice::Preset(_, preset) => {
+                ModelChoice::Favorite(favorite) => {
                     if thread_id.is_none() {
-                        view.choose_provider(&preset.provider, cx);
+                        view.choose_provider(&favorite.provider, cx);
                     }
-                    view.set_model_selection(Some(preset.model), preset.options, cx);
+                    view.set_model_selection(Some(favorite.model), favorite.options, cx);
                 }
-                ModelChoice::Model(model) if view.model_selection().0 != model.as_deref() => {
-                    view.set_model_selection(model, ModelOptions::default(), cx);
+                ModelChoice::Model(model) if view.model_selection().0 != Some(model.as_str()) => {
+                    let options = if provider_model.as_deref() == Some(model.as_str())
+                        && view.model_selection().0.is_none()
+                    {
+                        view.model_selection().1.clone()
+                    } else {
+                        ModelOptions::default()
+                    };
+                    view.set_model_selection(Some(model), options, cx);
                 }
                 ModelChoice::Model(_) => {}
             }
         })
         .detach();
-        if searchable {
-            list.focus_handle(cx).focus(window);
-        }
+        list.focus_handle(cx).focus(window);
         self.model_picker = Some(list);
         cx.notify();
     }

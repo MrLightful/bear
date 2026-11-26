@@ -59,7 +59,7 @@ def workspace_steps(shot, checkout):
         {"click": "Conversation name"}, {"type": "Review the workspace"}, {"click": "Open conversation"},
         *shot("conversation-ready", "status/Ready"),
         {"click": "model-automatic"}, *shot("model-picker", "model-option/fixture-fast"),
-        {"click": "model-option-automatic"},
+        {"key": "escape"},
         *settings_steps(shot, checkout),
         {"click": "All files tab"}, {"click": "Workspace file/src"},
         *shot("file-tree", "Workspace file/src/lib.rs"),
