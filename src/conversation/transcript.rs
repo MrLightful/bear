@@ -334,14 +334,16 @@ impl Desktop {
             conversation_error_response(&error.message, cx)
                 .w(response_width)
                 .when_some(error.unsent_message.clone(), |row, text| {
-                    row.child(h_flex().mt_2().child(
-                        Button::new(("copy-follow-up", index))
-                            .small()
-                            .label("Copy message")
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                            }),
-                    ))
+                    row.child(
+                        h_flex().mt_2().child(
+                            Button::new(("copy-follow-up", index))
+                                .small()
+                                .label("Copy message")
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                }),
+                        ),
+                    )
                 })
         };
         let mut run_error_shown = false;
@@ -374,7 +376,8 @@ impl Desktop {
                 rows = rows
                     .child(self.message_row(thread, item, provider, content_width, window, cx))
                     .children(
-                        errors.clone()
+                        errors
+                            .clone()
                             .filter(|(_, error)| error.after.as_ref() == Some(&item.message.id))
                             .map(|error| error_row(error, cx)),
                     );

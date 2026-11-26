@@ -778,7 +778,10 @@ impl Desktop {
                     != old.history.messages.last().map(|m| &m.message.id)
                     || thread.streaming_text != old.streaming_text
                     || thread.activity != old.activity
-                    || thread.latest_run.as_ref().and_then(|run| run.error.as_ref())
+                    || thread
+                        .latest_run
+                        .as_ref()
+                        .and_then(|run| run.error.as_ref())
                         != old.latest_run.as_ref().and_then(|run| run.error.as_ref()))
             {
                 self.history_scroll.scroll_to_bottom();
@@ -1224,7 +1227,9 @@ impl Desktop {
                         if let Some(Err(error)) = cleanup {
                             v.record_error(
                                 target,
-                                format!("Message sent. Could not remove its Backlog draft. {error}"),
+                                format!(
+                                    "Message sent. Could not remove its Backlog draft. {error}"
+                                ),
                                 None,
                                 cx,
                             );
@@ -1906,83 +1911,89 @@ impl Desktop {
             .w(width)
             .mx_auto()
             .relative()
-            .when(show_scroll_to_end, |column| column.child(Self::scroll_to_end_button(cx)))
-            .when(fresh, |column| {
-                column.child(
-                    heading("What should we build?").text_xl().mx_4().mb_3(),
-                )
+            .when(show_scroll_to_end, |column| {
+                column.child(Self::scroll_to_end_button(cx))
             })
-        .child(
-            Self::composer_surface(cx)
-                .on_drop(cx.listener(Self::drop_attachments))
-                .mx_4().mb_2()
-                .when_some(
-                    last_run.and_then(|run| run.prompt_suggestion.clone()),
-                    |row, hint| {
-                        row.child(control!(
-                            "Suggested reply",
-                            Button::new("suggestion")
-                                .label(hint.clone())
-                                .on_click(cx.listener(move |view, _, window, cx| {
-                                    if view.prompt.read(cx).value().is_empty() {
-                                        view.prompt.update(cx, |input, cx| {
-                                            input.set_value(hint.clone(), window, cx)
-                                        });
-                                        view.prompt.focus_handle(cx).focus(window);
-                                    }
-                                }))
-                        ))
-                    },
-                )
-                .child(message_input)
-                .children(self.attachment_list(attachments, cx))
-                .when(thread.queued_count > 0, |composer| {
-                    let count = thread.queued_count;
-                    let noun = if count == 1 { "message" } else { "messages" };
-                    let summary = if thread.queue_held {
-                        format!("{count} queued {noun} · paused")
-                    } else {
-                        format!("{count} queued {noun}")
-                    };
-                    composer.child(
-                        h_flex()
-                            .gap_2()
-                            .child(control!(summary.clone(), div().text_sm().child(summary)))
-                            .when(thread.queue_held, |row| {
-                                let thread = thread.id.clone();
-                                row.child(control!(
-                                    "Resume queue",
-                                    Button::new("resume-queue").label("Resume queue").on_click(
-                                        cx.listener(move |v, _, _, cx| {
-                                            let result = v
-                                                .runtime
-                                                .resume_queue(
-                                                    CommandId(Uuid::new_v4().to_string()),
-                                                    thread.clone(),
-                                                )
-                                                .map(|_| ());
-                                            v.report(result, cx);
-                                        })
-                                    )
-                                ))
-                            }),
+            .when(fresh, |column| {
+                column.child(heading("What should we build?").text_xl().mx_4().mb_3())
+            })
+            .child(
+                Self::composer_surface(cx)
+                    .on_drop(cx.listener(Self::drop_attachments))
+                    .mx_4()
+                    .mb_2()
+                    .when_some(
+                        last_run.and_then(|run| run.prompt_suggestion.clone()),
+                        |row, hint| {
+                            row.child(control!(
+                                "Suggested reply",
+                                Button::new("suggestion").label(hint.clone()).on_click(
+                                    cx.listener(move |view, _, window, cx| {
+                                        if view.prompt.read(cx).value().is_empty() {
+                                            view.prompt.update(cx, |input, cx| {
+                                                input.set_value(hint.clone(), window, cx)
+                                            });
+                                            view.prompt.focus_handle(cx).focus(window);
+                                        }
+                                    })
+                                )
+                            ))
+                        },
                     )
-                })
-                .child(
-                    h_flex()
-                        .flex_wrap().gap_2()
-                        .child(self.model_control(cx))
-                        .child(div().flex_1().min_w_0())
-                        .child(self.mcp_status_control(window, cx))
-                        .child(h_flex().gap_2().flex_shrink_0()
-                            .child(self.attach_button(attachments, cx))
-                            .children(stop)
-                            .when(!can_stop || !empty_draft, |row| {
-                                row.child(control!(_action_label, send.primary()))
-                            })),
-                ),
-        )
-        .pb_2();
+                    .child(message_input)
+                    .children(self.attachment_list(attachments, cx))
+                    .when(thread.queued_count > 0, |composer| {
+                        let count = thread.queued_count;
+                        let noun = if count == 1 { "message" } else { "messages" };
+                        let summary = if thread.queue_held {
+                            format!("{count} queued {noun} · paused")
+                        } else {
+                            format!("{count} queued {noun}")
+                        };
+                        composer.child(
+                            h_flex()
+                                .gap_2()
+                                .child(control!(summary.clone(), div().text_sm().child(summary)))
+                                .when(thread.queue_held, |row| {
+                                    let thread = thread.id.clone();
+                                    row.child(control!(
+                                        "Resume queue",
+                                        Button::new("resume-queue").label("Resume queue").on_click(
+                                            cx.listener(move |v, _, _, cx| {
+                                                let result = v
+                                                    .runtime
+                                                    .resume_queue(
+                                                        CommandId(Uuid::new_v4().to_string()),
+                                                        thread.clone(),
+                                                    )
+                                                    .map(|_| ());
+                                                v.report(result, cx);
+                                            })
+                                        )
+                                    ))
+                                }),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(self.model_control(cx))
+                            .child(div().flex_1().min_w_0())
+                            .child(self.mcp_status_control(window, cx))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .flex_shrink_0()
+                                    .child(self.attach_button(attachments, cx))
+                                    .children(stop)
+                                    .when(!can_stop || !empty_draft, |row| {
+                                        row.child(control!(_action_label, send.primary()))
+                                    }),
+                            ),
+                    ),
+            )
+            .pb_2();
         page.child(column)
     }
 
