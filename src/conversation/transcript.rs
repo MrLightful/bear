@@ -258,17 +258,9 @@ impl Desktop {
         };
         let width = Self::transcript_width(width);
         v_flex().flex_1().min_h_0().child(
-            Self::history_viewport().child(
-                v_flex()
-                    .w(width)
-                    .px(GUTTER)
-                    .flex_shrink_0()
-                    .child(launch_workspace::worktree_setup(
-                        stage,
-                        Some(&progress.title),
-                        cx,
-                    )),
-            ),
+            Self::history_viewport().child(v_flex().w(width).px(GUTTER).flex_shrink_0().child(
+                launch_workspace::worktree_setup(stage, Some(&progress.title), cx),
+            )),
         )
     }
 
