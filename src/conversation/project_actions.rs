@@ -27,9 +27,7 @@ impl PrAction {
 
     fn tooltip(self) -> &'static str {
         match self {
-            Self::Create => {
-                "Commit any pending changes, push the branch, and create a pull request"
-            }
+            Self::Create => "Queue a request to write and publish a pull request",
             Self::Resolve => "Ask this conversation to resolve merge conflicts",
             Self::Fix => "Ask this conversation to fix failed checks or address requested changes",
             Self::Update(PullRequestUpdate::Merge(_)) => "Review and merge the pull request",
@@ -176,10 +174,8 @@ impl Desktop {
                             let sequence = thread.history.sequence;
                             let checkout = Checkout {
                                 runtime,
-                                thread: target,
+                                thread: Some(target),
                                 root,
-                                provider: thread.provider_instance,
-                                model: thread.model,
                             };
                             checkout.has_current_merged_pr().await.then_some(sequence)
                         })
@@ -248,13 +244,10 @@ impl Desktop {
     }
 
     fn pull_request_checkout(&self, id: &ThreadId) -> Checkout {
-        let thread = self.current.as_ref().expect("selected conversation");
         Checkout {
             runtime: self.runtime.clone(),
-            thread: id.clone(),
+            thread: Some(id.clone()),
             root: self.workspaces[id].root.clone(),
-            provider: thread.provider_instance.clone(),
-            model: thread.model.clone(),
         }
     }
 
@@ -281,27 +274,40 @@ impl Desktop {
         match (status, action) {
             (Status::Create { branch, .. }, PrAction::Create) => {
                 let id = thread.id.clone();
-                let checkout = self.pull_request_checkout(&id);
-                let branch = branch.clone();
-                self.pull_request_action.insert(id.clone());
-                cx.notify();
-                let job = self
-                    .executor
-                    .spawn(async move { checkout.create_pull_request(&branch).await });
-                cx.spawn(async move |view, cx| {
-                    let result = job
-                        .await
-                        .context("Run pull request action")
-                        .and_then(|result| result);
-                    let _ = view.update(cx, |view, cx| {
-                        let result = result.map(|_| ());
-                        if let Some(workspace) = view.workspaces.get(&id) {
-                            workspace.refresh_after_checkout_update(view.workspace_tab, cx);
-                        }
-                        view.finish_pull_request_action(id, Some(result), cx);
-                    });
-                })
-                .detach();
+                let result = (|| {
+                    let text = crate::github::create_request(&self.workspaces[&id].root, branch)?;
+                    let receipt = self.runtime.dispatch(Command {
+                        id: CommandId(Uuid::new_v4().to_string()),
+                        thread_id: id.clone(),
+                        action: Action::Enqueue { text },
+                    })?;
+                    receipt.run_id.context("Create PR did not enqueue a turn")
+                })();
+                match result {
+                    Ok(run) => {
+                        self.pull_request_action.insert(id.clone());
+                        cx.notify();
+                        let runtime = self.runtime.clone();
+                        let job = self.executor.spawn({
+                            let id = id.clone();
+                            async move { runtime.wait(&id, &run).await }
+                        });
+                        cx.spawn(async move |view, cx| {
+                            let result = job
+                                .await
+                                .context("Wait for the queued pull request")
+                                .and_then(|result| result.map(|_| ()).map_err(Into::into));
+                            let _ = view.update(cx, |view, cx| {
+                                if let Some(workspace) = view.workspaces.get(&id) {
+                                    workspace.refresh_after_checkout_update(view.workspace_tab, cx);
+                                }
+                                view.finish_pull_request_action(id, Some(result), cx);
+                            });
+                        })
+                        .detach();
+                    }
+                    Err(error) => self.finish_pull_request_action(id, Some(Err(error)), cx),
+                }
             }
             (Status::Conflicts | Status::Found { .. }, PrAction::Resolve | PrAction::Fix) => {
                 self.handoff_pull_request(action, status.clone(), cx);

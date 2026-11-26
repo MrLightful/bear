@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import subprocess
+import shlex
 import sys
 import time
 from uuid import uuid4
@@ -45,50 +46,71 @@ for line in sys.stdin:
         assert frame["result"] == {"decision": "accept"}
         file.write_text("41\n")
         complete("Created the answer file.")
-    elif method == "config/read" and Path("..", "commit-message.json").is_file():
-        emit(id=frame["id"], result={"config": {"mcp_servers": {
-            "fixture.server": {"command": "/usr/bin/false"},
-        }}})
     elif method in ("thread/start", "thread/resume"):
         assert Path(params["cwd"]) == Path.cwd()
         assert Path(subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"], text=True).rstrip("\n")) == Path.cwd()
-        ephemeral = params.get("ephemeral", False)
-        if ephemeral:
-            assert params["approvalPolicy"] == "never"
-            assert params["sandbox"] == "read-only" and params["environments"] == []
-            assert params["config"]["mcp_servers"] == {"fixture.server": {"enabled": False}}
-            assert params["config"]["features.hooks"] is False
-            assert params["config"]["features.plugins"] is False
-        else:
-            approval_policy = params["approvalPolicy"]
-            assert approval_policy in ("on-request", "never", full_access_policy)
-            if approval_policy == full_access_policy:
-                server_name, = [
-                    key.removeprefix("mcp_servers.") for key in params["config"]
-                    if key.startswith("mcp_servers.")
-                ]
+        assert not params.get("ephemeral", False)
+        approval_policy = params["approvalPolicy"]
+        assert approval_policy in ("on-request", "never", full_access_policy)
+        if approval_policy == full_access_policy:
+            server_name, = [
+                key.removeprefix("mcp_servers.") for key in params["config"]
+                if key.startswith("mcp_servers.")
+            ]
         session = params["threadId"] if method == "thread/resume" else str(uuid4())
         sandbox = params["sandbox"]
         emit(id=frame["id"], result={"thread": {"id": session}, "model": "fixture-model"})
     elif method == "turn/start":
         prompt = params["input"][0]["text"]
-        if ephemeral:
-            assert params["outputSchema"]["required"] == ["subject", "body"]
-            for evidence in ("Base", "staged.txt", "unstaged.txt", "removed.txt", "new.txt",
-                             "+Staged content", "+Updated content", "-Remove this", "+New content"):
-                assert evidence in prompt, evidence
-            assert "ignored.log" not in prompt
-            scenario = json.loads((Path.cwd().parent / "commit-message.json").read_text())
+        if prompt.startswith("Create a pull request from this conversation"):
+            assert "Follow the bundled Bear skill" in prompt
+            inspect, publish = [
+                shlex.split(block.split("\n", 1)[1].strip())
+                for block in prompt.split("```") if block.startswith("sh\n")
+            ]
+            assert inspect[1] == "--inspect-pull-request"
+            assert publish[1] == "--publish-pull-request"
             turn = str(uuid4())
             emit(id=frame["id"], result={"turn": {"id": turn}})
-            if scenario == "invalid":
-                complete("Invalid commit message")
+            inspected = subprocess.run(inspect, capture_output=True, text=True)
+            if inspected.returncode:
+                complete(inspected.stderr.strip())
                 continue
+            snapshot = json.loads(inspected.stdout)
+            root = Path.cwd().parent
+            scenario_file = root / "commit-message.json"
+            scenario = json.loads(scenario_file.read_text()) if scenario_file.exists() else "success"
+            expected = root / "create.json"
+            fields = json.loads(expected.read_text())["payload"] if expected.exists() else {
+                "title": "Update review fixtures",
+                "body": "Cover staged, unstaged, new, and removed files.",
+            }
+            payload = {
+                "head_oid": snapshot["head_oid"],
+                "pending_tree": snapshot["pending_tree"],
+                "title": fields["title"],
+                "body": fields["body"] or "Verification details for this fixture.",
+                "commit_subject": "Commit the reviewed fixtures" if snapshot["pending_tree"] else None,
+            }
+            if scenario == "invalid":
+                payload["commit_subject"] = "not\na single line"
             if scenario == "edit":
                 Path("new.txt").write_text("New content, edited during generation.\n")
-            complete(json.dumps({"subject": "Update review fixtures",
-                                 "body": "Cover staged, unstaged, new, and removed files."}))
+            published = subprocess.run(publish, input=json.dumps(payload), capture_output=True, text=True)
+            complete((published.stderr if published.returncode else published.stdout).strip())
+            continue
+        if prompt == "Finish the pending review changes.":
+            turn = str(uuid4())
+            emit(id=frame["id"], result={"turn": {"id": turn}})
+            notify("item/agentMessage/delta", delta="Preparing the final review change.")
+            release = Path.cwd().parent / "finish-review"
+            deadline = time.monotonic() + 20
+            while not release.exists():
+                assert time.monotonic() < deadline, "Queued PR was not observed"
+                time.sleep(.05)
+            Path("new.txt").write_text("Final content from the running turn.\n")
+            complete("Final review change ready.")
             continue
         if params["collaborationMode"]["mode"] == "plan":
             assert prompt == "Plan the answer file."
