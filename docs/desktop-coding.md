@@ -3,7 +3,7 @@
 On macOS, install Git, Xcode, Rust/Cargo 1.94.1 or later and a signed-in Codex CLI. From the Bear checkout, launch the native app with the following command.
 
 ```sh
-cargo run --locked --manifest-path desktop/Cargo.toml --target-dir target/desktop
+cargo run --locked --manifest-path Cargo.toml --target-dir target/desktop
 ```
 
 To install a bundle, use the release build prerequisites and choose an unused destination. [Release build prerequisites](verification.md#package-the-desktop-app)
@@ -95,11 +95,13 @@ The conversation sidebar is visible when Bear opens. Use the left sidebar button
 
 ## Desktop data directory
 
-Desktop uses `~/.huggler` by default. `userdata/` holds `huggler.sqlite3`, preferences, and the saved conversation selection. Managed Git checkouts go in `worktrees/`, and conversations started without a project go in `scratch/`.
+Desktop uses `~/.bear` by default. `userdata/` holds `huggler.sqlite3`, preferences, and the saved conversation selection. Managed Git checkouts go in `worktrees/`, and conversations started without a project go in `scratch/`.
 
-Set `HUGGLER_HOME` before launch to use the same layout under a different directory. The existing `HUGGLER_STATE_DIR` override takes precedence and uses its original flat layout, with `huggler.sqlite3`, `worktrees/`, and `scratch/` directly under the specified path.
+Bear identifies itself to providers and MCP clients as `bear`. Set `HUGGLER_HOME` before launch to use the same layout under a different directory. The existing `HUGGLER_STATE_DIR` override takes precedence and uses its original flat layout, with `huggler.sqlite3`, `worktrees/`, and `scratch/` directly under the specified path.
 
-If `~/.huggler/userdata/huggler.sqlite3` is absent and an existing database is found at `~/Library/Application Support/dev.huggler.stage2/huggler.sqlite3`, Desktop continues to use the old directory in place. Saved conversations can still open their original checkout paths. If the home directory cannot be resolved, Desktop uses the previous platform data directory when available.
+To reopen data created with the previous dot-directory default, launch with `HUGGLER_HOME="$HOME/.huggler"`.
+
+If `~/.bear/userdata/huggler.sqlite3` is absent and an existing database is found at `~/Library/Application Support/dev.huggler.stage2/huggler.sqlite3`, Desktop continues to use the old directory in place. Saved conversations can still open their original checkout paths. If the home directory cannot be resolved, Desktop uses the previous platform data directory when available.
 
 ## Desktop settings
 
@@ -128,7 +130,7 @@ Open **Advanced settings** to set a preset's executable path. Codex and Claude A
 From the repository root, run these commands in a macOS GUI session with Python 3.12 or later.
 
 ```sh
-cargo build --locked --manifest-path desktop/Cargo.toml --features qualification --target-dir target/desktop
+cargo build --locked --manifest-path Cargo.toml --features qualification --target-dir target/desktop
 python3 scripts/check-provider-desktop.py target/desktop/debug/bear
 python3 scripts/check-desktop-coding.py target/desktop/debug/bear
 python3 scripts/check-desktop-pull-requests.py target/desktop/debug/bear

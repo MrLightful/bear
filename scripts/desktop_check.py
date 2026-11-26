@@ -80,7 +80,7 @@ def run_window(executable, state, steps, env):
 def huggler_package():
     metadata = json.loads(subprocess.check_output([
         "cargo", "metadata", "--locked", "--format-version", "1",
-        "--manifest-path", ROOT / "desktop/Cargo.toml",
+        "--manifest-path", ROOT / "Cargo.toml",
     ]))
     package, = (package for package in metadata["packages"] if package["name"] == "huggler")
     return package

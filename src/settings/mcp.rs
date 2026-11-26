@@ -432,7 +432,7 @@ impl Settings {
                             ))
                             .child(hint(
                                 if reserved {
-                                    "Reserved for Huggler’s built-in tools"
+                                    "Reserved for Bear’s built-in tools"
                                 } else {
                                     transport
                                 },

@@ -56,10 +56,11 @@ def hold():
 
 
 def approve_mcp(name):
-    tool_name = "mcp__huggler__" + name
+    server = client["name"]
+    tool_name = f"mcp__{server}__{name}"
     emit(id="approve-mcp", method="session/request_permission", params={
         "sessionId": session, "toolCall": {"toolCallId": str(uuid.uuid4()), "title": tool_name,
-            "_meta": {"claudeCode": {"toolName": tool_name, "mcpServer": {"name": "huggler"}}}},
+            "_meta": {"claudeCode": {"toolName": tool_name, "mcpServer": {"name": server}}}},
         "options": [{"optionId": "allow-once", "name": "Yes", "kind": "allow_once"}],
     })
     decision = json.loads(next(sys.stdin))
@@ -80,7 +81,9 @@ for line in sys.stdin:
     params = frame.get("params", {})
     if method == "initialize":
         client = params["clientInfo"]
-        assert client["name"] in ("huggler", "atlas")
+        assert client["name"] in ("bear", "huggler", "atlas")
+        peer_prefix = f"Peer message from {client['title']} "
+        task_prefix = f"{client['title']} delegated task results\n"
         emit(id=frame["id"], result={"protocolVersion": 1, "agentCapabilities": {
             "loadSession": True, "mcpCapabilities": {"http": True}}})
     elif method in ("session/new", "session/load"):
@@ -293,7 +296,7 @@ for line in sys.stdin:
             task_id = text.removeprefix("retry stop ")
             assert call("task_cancel", taskId=task_id, clientRequestId="stop-review")["delivery"] == "disposed"
             finish("Stop retried")
-        elif text.startswith("Huggler delegated task results\n"):
+        elif text.startswith(task_prefix):
             results = json.loads(text.split("\n", 1)[1])
             finish("Received: " + ", ".join(r["result"] for r in results))
         elif text.startswith("echo "):
@@ -306,9 +309,9 @@ for line in sys.stdin:
             for key in ("first", "second"):
                 assert deliver("author", key, key)["delivery"] == "queued"
             hold()
-        elif text.startswith("Peer message from Huggler "):
+        elif text.startswith(peer_prefix):
             attribution, message = text.split("\n\n", 1)
-            sender = json.loads(attribution.removeprefix("Peer message from Huggler "))["thread_id"]
+            sender = json.loads(attribution.removeprefix(peer_prefix))["thread_id"]
             if message == "read batch marker":
                 finish(Path("batch-marker").read_text())
             elif message.startswith("nested "):
@@ -337,7 +340,7 @@ for line in sys.stdin:
                 assert e.code == 401
             else:
                 raise AssertionError("revoked caller retained access")
-        if text.startswith("Peer message from Huggler "):
+        if text.startswith(peer_prefix):
             if message == "interrupt this review":
                 emit(id=prompt_id, result={"stopReason": "cancelled"})
             elif message == "second review":

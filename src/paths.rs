@@ -40,7 +40,7 @@ impl StoragePaths {
             });
         }
         let default = home.filter(|path| path.is_absolute()).map(|home| Self {
-            base: home.join(".huggler"),
+            base: home.join(".bear"),
             userdata: true,
         });
 
@@ -69,13 +69,13 @@ impl StoragePaths {
         self.base.join("scratch")
     }
 
-    pub(crate) fn runtime_options(&self) -> HugglerOptions {
-        let mut options = HugglerOptions::new(&self.base);
+    pub(crate) fn runtime_options(&self) -> Result<HugglerOptions> {
+        let mut options = HugglerOptions::new(&self.base).with_name("Bear")?;
         options.storage.database_path = self
             .state_subdirectory()
             .join(&options.storage.database_path);
         options.output.version = env!("CARGO_PKG_VERSION").into();
-        options
+        Ok(options)
     }
 
     fn state_subdirectory(&self) -> &Path {
@@ -100,12 +100,15 @@ mod tests {
         let home = tempfile::tempdir()?;
         let root = home.path().canonicalize()?;
         let paths = StoragePaths::resolve(None, None, Some(&root), None)?;
-        let base = root.join(".huggler");
+        let base = root.join(".bear");
         assert_eq!(paths.state_dir(), base.join("userdata"));
         assert_eq!(paths.scratch_dir(), base.join("scratch"));
 
         tokio::runtime::Runtime::new()?.block_on(async {
-            let runtime = Huggler::open(paths.runtime_options()).await?;
+            let options = paths.runtime_options()?;
+            assert_eq!(options.output.name, "bear");
+            assert_eq!(options.output.title, "Bear");
+            let runtime = Huggler::open(options).await?;
             assert!(paths.state_dir().join("huggler.sqlite3").is_file());
             fs::create_dir(paths.scratch_dir())?;
             let scratch = runtime.create_scratch(&paths.scratch_dir().join("conversation"))?;
@@ -162,17 +165,17 @@ mod tests {
             let paths = resolve()?;
             assert_eq!(paths.state_dir(), legacy);
             assert_eq!(paths.scratch_dir(), legacy.join("scratch"));
-            let runtime = Huggler::open(paths.runtime_options()).await?;
+            let runtime = Huggler::open(paths.runtime_options()?).await?;
             assert_eq!(runtime.thread_checkout(&thread)?, project.root);
             runtime.close().await?;
 
             let paths = StoragePaths::resolve(None, None, None, Some(legacy.clone()))?;
-            let runtime = Huggler::open(paths.runtime_options()).await?;
+            let runtime = Huggler::open(paths.runtime_options()?).await?;
             assert_eq!(runtime.thread_checkout(&thread)?, project.root);
             runtime.close().await?;
 
             let paths = StoragePaths::resolve(None, None, Some(home.path()), None)?;
-            let runtime = Huggler::open(paths.runtime_options()).await?;
+            let runtime = Huggler::open(paths.runtime_options()?).await?;
             assert!(runtime.conversation_list()?.threads.is_empty());
             runtime.close().await?;
             assert_eq!(resolve()?.state_dir(), paths.state_dir());
@@ -199,7 +202,7 @@ mod tests {
         assert_eq!(paths.state_dir(), state);
         assert_eq!(paths.scratch_dir(), state.join("scratch"));
         assert_eq!(
-            paths.runtime_options().storage.database_path,
+            paths.runtime_options()?.storage.database_path,
             Path::new("huggler.sqlite3")
         );
 
@@ -207,7 +210,7 @@ mod tests {
         assert_eq!(paths.state_dir(), home.join("userdata"));
         assert_eq!(paths.scratch_dir(), home.join("scratch"));
         assert_eq!(
-            paths.runtime_options().storage.database_path,
+            paths.runtime_options()?.storage.database_path,
             Path::new("userdata/huggler.sqlite3")
         );
         Ok(())

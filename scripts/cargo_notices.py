@@ -8,14 +8,14 @@ import subprocess
 import tomllib
 
 
-def write_notices(root, resources, target, features, *, manifest="desktop/Cargo.toml", component="desktop"):
+def write_notices(root, resources, target, features, *, manifest="Cargo.toml", component="desktop"):
     resources.mkdir()
     shutil.copyfile(root / "LICENSE", resources / "LICENSE.txt")
     rust_docs = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
     shutil.copyfile(rust_docs / "share/doc/rust/COPYRIGHT-library.html", resources / "Rust-library.html")
     report = json.loads(subprocess.check_output([
         "cargo", "about", "generate", "--frozen", "--fail", "--format", "json",
-        "--config", root / "desktop/about.toml", "--manifest-path", root / manifest, "--target", target, *features,
+        "--config", root / "about.toml", "--manifest-path", root / manifest, "--target", target, *features,
     ], cwd=root))
     # cargo-about selects a license from each SPDX expression. Keep upstream
     # notices as well, including nested notices for vendored native sources.
@@ -46,31 +46,31 @@ def write_notices(root, resources, target, features, *, manifest="desktop/Cargo.
                 # rav1e distributes PATENTS with Windows-1252 quotation marks.
                 encoding = "cp1252" if name == "rav1e" and version == "0.8.1" and path.name == "PATENTS" else "utf-8"
                 texts[path.read_text(encoding=encoding).strip()].add(f"{name} {version} / {path.relative_to(folder)}")
-    supplement = tomllib.loads((root / "desktop/upstream-notices.toml").read_text())
+    supplement = tomllib.loads((root / "upstream-notices.toml").read_text())
     for notice in supplement["notice"]:
         for label, url in notice["sources"].items():
             if label in packages:
                 texts[notice["text"].strip()].add(f"{label} / {url}")
     if component == "desktop":
-        texts[(root / "desktop/vendor/gpui-component/LICENSE-APACHE").read_text().strip()].add(
+        texts[(root / "vendor/gpui-component/LICENSE-APACHE").read_text().strip()].add(
             "gpui-component 0.5.1 (modified input rendering) / "
             "https://crates.io/api/v1/crates/gpui-component/0.5.1/download"
         )
-        texts[(root / "desktop/vendor/ghostty-vt/LICENSE").read_text().strip()].add(
+        texts[(root / "vendor/ghostty-vt/LICENSE").read_text().strip()].add(
             "libghostty-vt 1.0.1 / https://github.com/ghostty-org/ghostty/tree/vt-1.0.1"
         )
-        texts[(root / "desktop/assets/dm-sans/OFL.txt").read_text().strip()].add(
+        texts[(root / "assets/dm-sans/OFL.txt").read_text().strip()].add(
             "DM Sans / https://github.com/googlefonts/dm-fonts/tree/4412393b7d2de9fe7a92064c2dce9b5af5d7fd26/Sans"
         )
-        texts[(root / "desktop/assets/provider-logos/LICENSE").read_text().strip()].add(
+        texts[(root / "assets/provider-logos/LICENSE").read_text().strip()].add(
             "Provider marks from theSVG / https://github.com/GLINCKER/thesvg/tree/551229c188b4ab6e2d8b5763b9633ec91206d04c"
         )
-        texts[(root / "desktop/assets/icons/mcp.LICENSE").read_text().strip()].add(
+        texts[(root / "assets/icons/mcp.LICENSE").read_text().strip()].add(
             "Model Context Protocol mark / "
             "https://github.com/modelcontextprotocol/docs/blob/573dc60c2e7aab2605b29d0bf27194aa7b02e4fb/favicon.svg"
         )
         for name in ("LICENSE.md", "NOTICE.md"):
-            texts[(root / "desktop/assets/file-icons" / name).read_text().strip()].add(
+            texts[(root / "assets/file-icons" / name).read_text().strip()].add(
                 f"File icons adapted from @pierre/trees 1.0.0-beta.6 / {name} / "
                 "https://registry.npmjs.org/@pierre/trees/-/trees-1.0.0-beta.6.tgz"
             )
