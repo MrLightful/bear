@@ -143,8 +143,12 @@ for line in sys.stdin:
                 complete("Approval mode confirmed.")
             continue
         if prompt.startswith(("Fix the failed checks", "Resolve the")):
-            if prompt.startswith("Fix"):
-                assert "fixture/project #12 (https://github.com/fixture/project/pull/12)" in prompt
+            pr_url = "https://github.com/fixture/project/pull/12"
+            assert prompt in (
+                f"Fix the failed checks or address requested changes for {pr_url}, verify the fix, and push to its head branch.",
+                f"Resolve the merge conflicts for {pr_url}, run the relevant checks, and push to its head branch.",
+                "Resolve the Git conflicts in this checkout and continue the operation in progress.",
+            )
             turn = str(uuid4())
             emit(id=frame["id"], result={"turn": {"id": turn}})
             complete("Received the pull request task.")
