@@ -31,6 +31,13 @@ impl ProviderCatalog {
         self.result.as_ref()?.as_ref().ok()
     }
 
+    fn supports_preset(&self, preset: &ModelPreset) -> bool {
+        !self.login_required()
+            && self
+                .report()
+                .is_none_or(|report| preset.supported_by(report))
+    }
+
     pub(super) fn status(&self) -> String {
         match &self.result {
             None => "Checking provider…".into(),
@@ -123,13 +130,7 @@ impl Models {
     fn preset_available(&self, preset: &ModelPreset, cx: &App) -> bool {
         self.preset_catalogs
             .get(&preset.provider)
-            .is_none_or(|catalog| {
-                let catalog = catalog.read(cx);
-                !catalog.login_required()
-                    && catalog
-                        .report()
-                        .is_none_or(|report| preset.supported_by(report))
-            })
+            .is_none_or(|catalog| catalog.read(cx).supports_preset(preset))
     }
 
     fn filter(&mut self, cx: &App) {
@@ -290,6 +291,31 @@ impl ListDelegate for Models {
 }
 
 impl Desktop {
+    pub(super) fn apply_launch_model_default(&mut self, cx: &App) {
+        let (_, checkout) = self.picker_source(cx);
+        let preset = self
+            .settings
+            .read(cx)
+            .enabled_presets()
+            .find(|(_, preset)| {
+                self.configured_providers(cx)
+                    .any(|provider| provider.id == preset.provider)
+                    && self
+                        .model_catalogs
+                        .get(&(preset.provider.clone(), checkout.clone()))
+                        .is_none_or(|catalog| catalog.read(cx).supports_preset(preset))
+            });
+        if let Some((_, preset)) = preset {
+            self.instance.clone_from(&preset.provider);
+            self.launch_model = Some(preset.model.clone());
+            self.launch_model_options.clone_from(&preset.options);
+        } else {
+            self.instance = Provider::Codex.key().into();
+            self.launch_model = None;
+            self.launch_model_options = ModelOptions::default();
+        }
+    }
+
     pub(super) fn model_source(&self, cx: &App) -> (ProviderInstanceId, PathBuf) {
         match &self.current {
             Some(thread) => (
@@ -369,7 +395,19 @@ impl Desktop {
             catalog.load(self.runtime.clone(), cx);
             catalog
         });
-        cx.observe(&catalog, |_, _, cx| cx.notify()).detach();
+        cx.observe(&catalog, |view, catalog, cx| {
+            let state = catalog.read(cx);
+            if view.current.is_none()
+                && !view.launch_model_overridden
+                && state.result.is_some()
+                && view.picker_source(cx) == (state.instance.clone(), state.checkout.clone())
+            {
+                view.apply_launch_model_default(cx);
+                view.preload_models(cx);
+            }
+            cx.notify();
+        })
+        .detach();
         self.model_catalogs.insert(source, catalog.clone());
         cx.notify();
         catalog
@@ -735,6 +773,7 @@ impl Desktop {
                 .and_then(|_| self.refresh());
             self.report(result, cx);
         } else {
+            self.launch_model_overridden = true;
             self.launch_model = model;
             self.launch_model_options = options;
             cx.notify();
