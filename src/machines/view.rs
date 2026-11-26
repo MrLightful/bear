@@ -1,7 +1,7 @@
 use super::ssh::{Connection, SavedMachine};
 use crate::{
     conversation::{
-        markdown_view::{ResponseImages, contains_mermaid_fence, prose},
+        markdown_view::{ResponseRenderContext, contains_mermaid_fence, prose},
         permission_card,
     },
     ui::{field, heading, hint, label},
@@ -468,9 +468,10 @@ impl RemoteProject {
         prose(
             id,
             text,
-            ResponseImages {
+            ResponseRenderContext {
                 run,
                 checkout: None,
+                desktop: None,
                 executor: &self.executor,
                 scroll: &self.history_scroll,
             },

@@ -20,7 +20,7 @@ use gpui_component::{
 };
 use huggler::{ToolTrace, ToolTracePayload};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     io::Read,
     path::Path,
     rc::Rc,
@@ -159,6 +159,7 @@ pub(super) struct DocumentTab {
     document: Document,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    pending_heading: RefCell<Option<String>>,
     diff_scroll: UniformListScrollHandle,
     mode: DocumentMode,
     copied_at: Option<Instant>,
@@ -378,6 +379,16 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_document_at_heading(document, None, window, cx);
+    }
+
+    pub(super) fn open_document_at_heading(
+        &mut self,
+        document: Document,
+        heading: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(thread) = self.current.as_ref().map(|thread| thread.id.clone()) else {
             return;
         };
@@ -404,6 +415,7 @@ impl Desktop {
                     focus: cx.focus_handle().tab_stop(true),
                     scroll: ScrollHandle::new(),
                     diff_scroll: UniformListScrollHandle::new(),
+                    pending_heading: RefCell::default(),
                     mode: DocumentMode::default(),
                     copied_at: None,
                     loaded: None,
@@ -417,6 +429,10 @@ impl Desktop {
         tabs.select(index);
         let tab = &mut tabs.tabs[index];
         tab.document = document;
+        if heading.is_some() {
+            tab.mode = DocumentMode::Preview;
+        }
+        *tab.pending_heading.get_mut() = heading;
         tab.revert_error = None;
         let editor_path = if let Some(path) = tab.document.path() {
             let editor_path = (tab.mode == DocumentMode::Raw || tabs.editors.contains_key(path))
@@ -1180,7 +1196,12 @@ impl DocumentTab {
                     markdown.render(
                         format!("markdown-document-{}", self.id),
                         text,
-                        true,
+                        self.load
+                            .is_none()
+                            .then(|| self.pending_heading.take())
+                            .flatten()
+                            .as_deref()
+                            .map(|heading| (heading, &self.scroll)),
                         window,
                         cx
                     )

@@ -24,7 +24,7 @@ use crate::{
     v_flex,
 };
 
-use super::{TextViewStyle, utils::list_item_prefix};
+use super::{LinkHandler, TextViewStyle, utils::list_item_prefix};
 
 #[allow(unused)]
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -389,6 +389,7 @@ impl CodeBlock {
                         self.state.clone(),
                         vec![],
                         self.styles.clone(),
+                        None,
                     ))
                     .when_some(node_cx.code_block_actions.clone(), |this, actions| {
                         this.child(
@@ -411,6 +412,7 @@ impl CodeBlock {
 pub(crate) struct NodeContext {
     pub(crate) link_refs: HashMap<SharedString, LinkMark>,
     pub(crate) style: TextViewStyle,
+    pub(super) on_link_click: Option<LinkHandler>,
     pub(crate) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
 }
 
@@ -601,6 +603,7 @@ impl Paragraph {
                             inline_node.state.clone(),
                             links.clone(),
                             highlights.clone(),
+                            node_cx.on_link_click.clone(),
                         )
                         .into_any_element(),
                     );
@@ -680,8 +683,16 @@ impl Paragraph {
         // Add the last text node
         if text.len() > 0 {
             self.state.lock().unwrap().set_text(text.into());
-            child_nodes
-                .push(Inline::new(ix, self.state.clone(), links, highlights).into_any_element());
+            child_nodes.push(
+                Inline::new(
+                    ix,
+                    self.state.clone(),
+                    links,
+                    highlights,
+                    node_cx.on_link_click.clone(),
+                )
+                .into_any_element(),
+            );
         }
 
         div().id(span.unwrap_or_default()).children(child_nodes)

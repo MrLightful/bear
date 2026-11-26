@@ -3,7 +3,7 @@ mod turn_rail;
 
 use self::activity_title::ActivityTitle;
 use super::attachments::{MESSAGE_LINE_HEIGHT, SentAttachmentCaption};
-use super::markdown_view::{ResponseImages, prose};
+use super::markdown_view::{ResponseRenderContext, prose};
 use super::*;
 use gpui_component::{Icon, tooltip::Tooltip};
 use huggler::{
@@ -403,14 +403,16 @@ impl Desktop {
         self.report(result, cx);
     }
 
-    fn response_images<'a>(
+    fn response_context<'a>(
         &'a self,
         thread: &ConversationDetail,
         run: &'a RunId,
-    ) -> ResponseImages<'a> {
-        ResponseImages {
+        cx: &Context<Self>,
+    ) -> ResponseRenderContext<'a> {
+        ResponseRenderContext {
             run,
             checkout: Some(&self.workspaces[&thread.id].root),
+            desktop: Some(cx.weak_entity()),
             executor: &self.executor,
             scroll: &self.history_scroll,
         }
@@ -506,7 +508,7 @@ impl Desktop {
                     prose(
                         format!("message-{id}"),
                         caption,
-                        self.response_images(thread, &message.run_id),
+                        self.response_context(thread, &message.run_id, cx),
                         window,
                         cx,
                     )
@@ -623,7 +625,7 @@ impl Desktop {
                         prose(
                             format!("stream-{}", run.id),
                             &thread.streaming_text,
-                            self.response_images(thread, &run.id),
+                            self.response_context(thread, &run.id, cx),
                             window,
                             cx
                         )
@@ -808,7 +810,7 @@ impl Desktop {
                         prose(
                             format!("commentary-{run}-{}", item.id),
                             &item.title,
-                            self.response_images(thread, run),
+                            self.response_context(thread, run, cx),
                             window,
                             cx
                         )
