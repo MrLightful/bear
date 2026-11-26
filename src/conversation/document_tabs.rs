@@ -14,7 +14,7 @@ use diff::Diff;
 pub(super) use editor::open_workspace_file;
 use editor::{Editor, confirm_discard};
 use gpui_component::{
-    WindowExt,
+    IconNamed, WindowExt,
     button::ButtonCustomVariant,
     scroll::{ScrollableElement, ScrollbarAxis},
     tooltip::Tooltip,
@@ -710,6 +710,30 @@ impl Desktop {
     }
 }
 
+pub(super) fn tab_icon_button(
+    id: &'static str,
+    icon_path: impl Into<SharedString>,
+    icon_size: impl Into<Length>,
+    cx: &App,
+) -> Button {
+    let theme = cx.theme();
+    let foreground = theme.foreground;
+    let icon_size = icon_size.into();
+    Button::new(id)
+        .custom(ButtonCustomVariant::new(cx))
+        .group(id)
+        // The tab beneath the action should keep its current background.
+        .block_mouse_except_scroll()
+        .child(
+            svg()
+                .path(icon_path)
+                .size(icon_size)
+                .flex_none()
+                .text_color(theme.muted_foreground)
+                .group_hover(id, move |style| style.text_color(foreground)),
+        )
+}
+
 pub(super) fn tab_surface(active: bool, cx: &App) -> Div {
     let theme = cx.theme();
     let hover = theme.muted;
@@ -867,16 +891,9 @@ impl DocumentTab {
                 tab.child(
                     control!(
                         format!("Keep open {_key}"),
-                        Button::new("keep-open")
-                            .ghost()
+                        tab_icon_button("keep-open", "icons/pin.svg", px(12.), cx)
                             .size(px(24.))
                             .p_0()
-                            .child(
-                                Icon::new(IconName::Check)
-                                    .path("icons/pin.svg")
-                                    .with_size(px(12.))
-                                    .text_color(muted)
-                            )
                             .tooltip("Keep Open")
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 view.keep_document_open(id, window, cx)
@@ -888,15 +905,9 @@ impl DocumentTab {
             .child(
                 control!(
                     format!("Close {_key}"),
-                    Button::new("close")
-                        .ghost()
+                    tab_icon_button("close", IconName::Close.path(), px(12.), cx)
                         .size(px(24.))
                         .p_0()
-                        .child(
-                            Icon::new(IconName::Close)
-                                .with_size(px(12.))
-                                .text_color(muted)
-                        )
                         .on_click(cx.listener(move |view, _, window, cx| {
                             view.close_document(id, window, cx)
                         }))

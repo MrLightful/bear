@@ -1,9 +1,9 @@
 use super::{
-    document_tabs::tab_surface,
+    document_tabs::{tab_icon_button, tab_surface},
     terminal::{StatusChanged, TerminalView},
     *,
 };
-use gpui_component::button::ButtonCustomVariant;
+use gpui_component::{IconNamed, button::ButtonCustomVariant};
 
 const DEFAULT_HEIGHT: f32 = 236.;
 const MIN_HEIGHT: f32 = 100.;
@@ -193,37 +193,44 @@ impl Desktop {
             .when(open, |header| header.bg(cx.theme().sidebar))
             .child(control!(
                 toggle,
-                Button::new("toggle-terminal")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .flex_none()
-                    .icon(if open {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .when(!open, |button| button.label("Terminal"))
-                    .tooltip(toggle)
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        let pane = &mut view
-                            .workspaces
-                            .get_mut(&toggle_thread)
-                            .expect("terminal workspace")
-                            .terminal;
-                        pane.open = !open;
-                        if open {
-                            if pane.is_focused(window, cx) {
-                                view.focus_workspace(window, cx);
-                            }
-                        } else if pane.next_id == 0 {
-                            view.open_terminal(&toggle_thread, TerminalLaunch::Shell, window, cx);
-                        } else if let Some(index) = pane.active {
-                            pane.scroll.scroll_to_item(index);
-                            pane.focus_active(window, cx);
+                (if open {
+                    tab_icon_button(
+                        "toggle-terminal",
+                        IconName::ChevronDown.path(),
+                        rems(0.875),
+                        cx,
+                    )
+                    .size_6()
+                    .p_0()
+                } else {
+                    Button::new("toggle-terminal")
+                        .ghost()
+                        .icon(IconName::ChevronRight)
+                        .label("Terminal")
+                })
+                .small()
+                .compact()
+                .flex_none()
+                .tooltip(toggle)
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    let pane = &mut view
+                        .workspaces
+                        .get_mut(&toggle_thread)
+                        .expect("terminal workspace")
+                        .terminal;
+                    pane.open = !open;
+                    if open {
+                        if pane.is_focused(window, cx) {
+                            view.focus_workspace(window, cx);
                         }
-                        cx.notify();
-                    }))
+                    } else if pane.next_id == 0 {
+                        view.open_terminal(&toggle_thread, TerminalLaunch::Shell, window, cx);
+                    } else if let Some(index) = pane.active {
+                        pane.scroll.scroll_to_item(index);
+                        pane.focus_active(window, cx);
+                    }
+                    cx.notify();
+                }))
             ))
             .when(open, |header| {
                 header
@@ -242,20 +249,26 @@ impl Desktop {
                             .child(
                                 control!(
                                     "New terminal",
-                                    Button::new("new-terminal")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .icon(IconName::Plus)
-                                        .tooltip("New terminal")
-                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                    tab_icon_button(
+                                        "new-terminal",
+                                        IconName::Plus.path(),
+                                        rems(0.875),
+                                        cx
+                                    )
+                                    .small()
+                                    .size_6()
+                                    .p_0()
+                                    .tooltip("New terminal")
+                                    .on_click(cx.listener(
+                                        move |view, _, window, cx| {
                                             view.open_terminal(
                                                 &new_thread,
                                                 TerminalLaunch::Shell,
                                                 window,
                                                 cx,
                                             )
-                                        }))
+                                        }
+                                    ))
                                 )
                                 .flex_shrink_0(),
                             ),
@@ -362,15 +375,9 @@ impl TerminalTab {
             ))
             .child(control!(
                 close_label.clone(),
-                Button::new("close")
-                    .ghost()
+                tab_icon_button("close", IconName::Close.path(), px(12.), cx)
                     .size(px(24.))
                     .p_0()
-                    .child(
-                        Icon::new(IconName::Close)
-                            .with_size(px(12.))
-                            .text_color(theme.muted_foreground)
-                    )
                     .tooltip(close_label)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.close_terminal(&close_thread, id, window, cx)
