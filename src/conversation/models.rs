@@ -1,5 +1,5 @@
 use super::*;
-use crate::settings::ModelPreferences;
+use crate::settings::{ModelPreferences, ModelPreset, STANDARD_SPEED};
 use gpui_component::{
     IconName, IndexPath, Sizable,
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
@@ -27,7 +27,7 @@ impl ProviderCatalog {
         matches!(&self.result, Some(Err(huggler::Error::LoginRequired)))
     }
 
-    fn report(&self) -> Option<&ProviderReport> {
+    pub(crate) fn report(&self) -> Option<&ProviderReport> {
         self.result.as_ref()?.as_ref().ok()
     }
 
@@ -68,16 +68,24 @@ impl ProviderCatalog {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum ModelChoice {
+    Preset(usize, ModelPreset),
+    Model(Option<String>),
+}
+
 pub(super) struct Models {
     catalog: Option<Entity<ProviderCatalog>>,
     current: Option<String>,
-    effort: Option<String>,
+    options: ModelOptions,
+    presets: Vec<(usize, ModelPreset)>,
+    preset_catalogs: HashMap<ProviderInstanceId, Entity<ProviderCatalog>>,
     query: String,
-    matches: Vec<Option<String>>,
+    matches: Vec<ModelChoice>,
     preferences: ModelPreferences,
 }
 
-pub(super) fn effort_label(effort: &str) -> String {
+pub(crate) fn effort_label(effort: &str) -> String {
     match effort {
         "xhigh" => "Extra high".into(),
         _ => {
@@ -112,10 +120,32 @@ impl Models {
         self.catalog.as_ref()?.read(cx).report()
     }
 
+    fn preset_available(&self, preset: &ModelPreset, cx: &App) -> bool {
+        self.preset_catalogs
+            .get(&preset.provider)
+            .is_none_or(|catalog| {
+                let catalog = catalog.read(cx);
+                !catalog.login_required()
+                    && catalog
+                        .report()
+                        .is_none_or(|report| preset.supported_by(report))
+            })
+    }
+
     fn filter(&mut self, cx: &App) {
         let report = self.report(cx);
         let models = report.map(|report| self.preferences.ordered(&report.models));
-        self.matches = std::iter::once(None)
+        let presets = self
+            .presets
+            .iter()
+            .filter(|(index, preset)| {
+                self.preset_available(preset, cx)
+                    && format!("preset {} {} {}", index + 1, preset.name, preset.model)
+                        .to_lowercase()
+                        .contains(&self.query)
+            })
+            .map(|(index, preset)| ModelChoice::Preset(*index, preset.clone()));
+        let choices = std::iter::once(None)
             .take(usize::from(self.catalog.is_some()))
             .chain(
                 models
@@ -131,8 +161,8 @@ impl Models {
                     || id.is_some_and(|id| id.to_lowercase().contains(&self.query))
                     || (id.is_none() && "default".contains(&self.query))
             })
-            .map(|id| id.map(str::to_owned))
-            .collect();
+            .map(|id| ModelChoice::Model(id.map(str::to_owned)));
+        self.matches = presets.chain(choices).collect();
     }
 }
 
@@ -149,7 +179,41 @@ impl ListDelegate for Models {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<ListItem> {
-        let choice = self.matches.get(ix.row)?;
+        let choice = match self.matches.get(ix.row)? {
+            ModelChoice::Model(choice) => choice,
+            ModelChoice::Preset(index, preset) => {
+                let effort = preset.options.effort.as_deref().map(effort_label);
+                let speed = preset.options.service_tier.as_deref();
+                let summary = match (effort, speed) {
+                    (Some(effort), Some(speed)) => {
+                        format!("{effort} · {}", ModelPreset::speed_label(Some(speed)))
+                    }
+                    (Some(effort), None) => effort,
+                    (None, speed) => ModelPreset::speed_label(speed).to_owned(),
+                };
+                let slot = format!("Preset {}", index + 1);
+                let name = preset.name.clone();
+                return Some(
+                    ListItem::new(ix.row)
+                        .check_icon(IconName::Check)
+                        .confirmed(
+                            self.catalog.as_ref().is_some_and(|catalog| {
+                                catalog.read(cx).instance == preset.provider
+                            }) && self.current.as_deref() == Some(preset.model.as_str())
+                                && self.options == preset.options,
+                        )
+                        .child(control!(
+                            format!("model-preset/{}", index + 1),
+                            h_flex()
+                                .gap_2()
+                                .min_w_0()
+                                .child(hint(slot, cx).flex_shrink_0())
+                                .child(div().flex_1().min_w_0().truncate().child(name))
+                                .child(hint(summary, cx).flex_shrink_0())
+                        )),
+                );
+            }
+        };
         let details = model_details(self.report(cx), choice.as_deref());
         let name = model_name(choice.as_deref(), details);
         #[cfg(all(feature = "qualification", target_os = "macos"))]
@@ -158,7 +222,7 @@ impl ListDelegate for Models {
             |id| format!("model-option/{id}"),
         );
         let effort = if self.current == *choice {
-            self.effort.as_deref()
+            self.options.effort.as_deref()
         } else {
             None
         };
@@ -345,7 +409,7 @@ impl Desktop {
             .small()
             .ghost()
             .dropdown_caret(true)
-            .tooltip("Choose model and effort")
+            .tooltip("Choose model or preset")
             .child(
                 h_flex()
                     .gap_1()
@@ -367,7 +431,10 @@ impl Desktop {
                     view.show_model_efforts = false;
                     // The list handles Escape and returns focus to the composer.
                     // The setup-only popover has no list to handle it.
-                    if picker.is_some_and(|list| list.read(cx).delegate().catalog.is_none()) {
+                    if picker.is_some_and(|list| {
+                        list.read(cx).delegate().catalog.is_none()
+                            && list.read(cx).delegate().presets.is_empty()
+                    }) {
                         view.focus_workspace(window, cx);
                     }
                     cx.notify();
@@ -418,6 +485,18 @@ impl Desktop {
                     }))
             )
             .flex_shrink_0();
+            let edit_presets = control!(
+                "Edit default models",
+                Button::new("edit-default-models")
+                    .small()
+                    .ghost()
+                    .label("Default Models")
+                    .tooltip("Edit default models")
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.model_picker = None;
+                        view.open_settings(SettingsTarget::DefaultModels, window, cx);
+                    }))
+            );
             let (message, retry) = match (active_configured, catalog.map(|catalog| &catalog.result))
             {
                 (false, _) if self.current.is_none() && !configured.is_empty() => {
@@ -453,8 +532,13 @@ impl Desktop {
                         ))
                     })
             });
-            if active_configured {
-                let height = (models.matches.len().max(1) as f32 * 32. + 36.).min(168.);
+            if active_configured || !models.presets.is_empty() {
+                let max_height = if models.presets.is_empty() {
+                    168.
+                } else {
+                    228.
+                };
+                let height = (models.matches.len().max(1) as f32 * 32. + 36.).min(max_height);
                 content = content
                     .child(
                         h_flex()
@@ -487,7 +571,7 @@ impl Desktop {
             {
                 content = content.child(self.model_options(details, options, cx));
             }
-            picker.child(content)
+            picker.child(content.child(h_flex().justify_end().child(edit_presets)))
         } else {
             picker
         };
@@ -610,7 +694,7 @@ impl Desktop {
                         view.update_model_options(
                             |options| {
                                 options.service_tier = Some(if enabled {
-                                    "default".into()
+                                    STANDARD_SPEED.into()
                                 } else {
                                     tier.clone()
                                 });
@@ -656,9 +740,9 @@ impl Desktop {
             cx.notify();
         }
         if let Some(list) = &self.model_picker {
-            let effort = self.model_selection().1.effort.clone();
+            let options = self.model_selection().1.clone();
             list.update(cx, |list, cx| {
-                list.delegate_mut().effort = effort;
+                list.delegate_mut().options = options;
                 cx.notify();
             });
         }
@@ -674,23 +758,66 @@ impl Desktop {
         let thread_id = self.current.as_ref().map(|t| t.id.clone());
         let (current, options) = self.model_selection();
         let current = current.map(str::to_owned);
-        let effort = options.effort.clone();
+        let options = options.clone();
+        let presets = self
+            .settings
+            .read(cx)
+            .enabled_presets()
+            .filter(|(_, preset)| {
+                (thread_id.is_none() || preset.provider == source.0)
+                    && self
+                        .configured_providers(cx)
+                        .any(|provider| provider.id == preset.provider)
+            })
+            .map(|(index, preset)| (index, preset.clone()))
+            .collect::<Vec<_>>();
+        let mut preset_catalogs = HashMap::new();
+        for (_, preset) in &presets {
+            preset_catalogs
+                .entry(preset.provider.clone())
+                .or_insert_with(|| {
+                    self.catalog_for((preset.provider.clone(), source.1.clone()), false, cx)
+                });
+        }
+        let searchable = configured || !presets.is_empty();
         let preferences = self.settings.read(cx).model_preferences(&source.0);
         let list = cx.new(|cx| {
             let mut models = Models {
                 catalog: catalog.clone(),
                 current,
-                effort,
+                options,
+                presets,
+                preset_catalogs,
                 query: String::new(),
                 matches: Vec::new(),
                 preferences,
             };
             models.filter(cx);
-            if let Some(catalog) = &catalog {
-                cx.observe(catalog, |list: &mut ListState<Models>, _, cx| {
-                    list.delegate_mut().filter(cx);
-                    cx.notify();
-                })
+            let catalogs = catalog.iter().chain(
+                models
+                    .preset_catalogs
+                    .values()
+                    .filter(|candidate| Some(*candidate) != catalog.as_ref()),
+            );
+            for catalog in catalogs {
+                cx.observe_in(
+                    catalog,
+                    window,
+                    |list: &mut ListState<Models>, _, window, cx| {
+                        let selected = list.selected_index();
+                        let models = list.delegate_mut();
+                        let choice = selected
+                            .and_then(|index| models.matches.get(index.row))
+                            .cloned();
+                        models.filter(cx);
+                        if let Some(index) = selected
+                            && models.matches.get(index.row) != choice.as_ref()
+                        {
+                            list.set_selected_index(None, window, cx);
+                        }
+                        cx.notify();
+                    },
+                )
                 .detach();
             }
             ListState::new(models, window, cx).searchable(true)
@@ -709,21 +836,37 @@ impl Desktop {
                 return;
             };
             let models = list.read(cx).delegate();
-            let Some(model) = models.matches.get(ix.row).cloned() else {
+            let Some(choice) = models.matches.get(ix.row).cloned() else {
                 return;
             };
+            if let ModelChoice::Preset(_, preset) = &choice
+                && !models.preset_available(preset, cx)
+            {
+                return;
+            }
             let same_context = view.picker_source(cx) == source
                 && view.current.as_ref().map(|t| &t.id) == thread_id.as_ref();
             view.model_picker = None;
             view.focus_workspace(window, cx);
             cx.notify();
-            if same_context && view.model_selection().0 != model.as_deref() {
-                let options = ModelOptions::default();
-                view.set_model_selection(model, options, cx);
+            if !same_context {
+                return;
+            }
+            match choice {
+                ModelChoice::Preset(_, preset) => {
+                    if thread_id.is_none() {
+                        view.choose_provider(&preset.provider, cx);
+                    }
+                    view.set_model_selection(Some(preset.model), preset.options, cx);
+                }
+                ModelChoice::Model(model) if view.model_selection().0 != model.as_deref() => {
+                    view.set_model_selection(model, ModelOptions::default(), cx);
+                }
+                ModelChoice::Model(_) => {}
             }
         })
         .detach();
-        if configured {
+        if searchable {
             list.focus_handle(cx).focus(window);
         }
         self.model_picker = Some(list);
