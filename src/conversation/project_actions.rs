@@ -176,6 +176,7 @@ impl Desktop {
                                 runtime,
                                 thread: Some(target),
                                 root,
+                                repository_root: None,
                             };
                             checkout.has_current_merged_pr().await.then_some(sequence)
                         })
@@ -248,6 +249,7 @@ impl Desktop {
             runtime: self.runtime.clone(),
             thread: Some(id.clone()),
             root: self.workspaces[id].root.clone(),
+            repository_root: None,
         }
     }
 

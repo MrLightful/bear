@@ -35,6 +35,13 @@ pub(super) enum TerminalLaunch<'a> {
 struct ResizeTerminal(ThreadId);
 
 impl TerminalPane {
+    pub(super) fn has_running_terminal(&self, cx: &App) -> bool {
+        self.tabs
+            .iter()
+            .filter_map(|tab| tab.shell.as_ref().ok())
+            .any(|terminal| terminal.read(cx).is_running())
+    }
+
     pub(super) fn release(&mut self, cx: &mut App) {
         for tab in self.tabs.drain(..) {
             if let Ok(terminal) = tab.shell {

@@ -1,0 +1,221 @@
+//! Trusted-host checkout preparation. Git checkout operations are blocking.
+use crate::*;
+use serde::Serialize;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+#[derive(Debug, PartialEq, Serialize)]
+pub enum SetupStatus {
+    Running,
+    Failed(String),
+    Ready,
+}
+
+/// How to name the local branch of a new managed worktree.
+#[derive(Clone, Copy, Debug)]
+pub enum WorktreeBranch<'a> {
+    /// Create this literal Git branch name. An existing branch is an error.
+    Exact(&'a str),
+    /// Derive a branch name from a descriptive title and disambiguate it if needed.
+    FromTitle(&'a str),
+}
+
+/// Result of inspecting or cleaning a managed checkout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum OrphanedWorktreeOutcome {
+    /// Inspection found that cleanup can safely remove this checkout.
+    Removable,
+    /// Cleanup removed the checkout and its Huggler reservation.
+    Removed,
+    /// A clean managed checkout has commits that need independent merge verification.
+    NeedsMergeVerification,
+    /// Cleanup retained the checkout because it could contain work.
+    Kept,
+    /// Cleanup attempted removal but the filesystem, Git or database rejected it.
+    Failed,
+}
+
+/// A managed checkout and the reason it was removed or retained.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OrphanedWorktreeEntry {
+    pub path: PathBuf,
+    pub outcome: OrphanedWorktreeOutcome,
+    pub reason: String,
+    /// Best-effort logical file size. Shared and sparse blocks can consume less disk space.
+    pub bytes: Option<u64>,
+}
+
+/// Inspection or cleanup results for all currently unreferenced managed checkouts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct OrphanedWorktreeReport {
+    pub entries: Vec<OrphanedWorktreeEntry>,
+    /// Best-effort logical bytes belonging to successfully removed directories.
+    pub bytes_freed: u64,
+}
+
+/// A managed checkout and the reasons it can be retained.
+#[derive(Clone, Debug)]
+pub struct ManagedWorktree {
+    pub path: PathBuf,
+    pub threads: Vec<ThreadId>,
+    pub active: usize,
+    pub busy: bool,
+    pub released: bool,
+}
+
+impl Huggler {
+    /// Clone into a new directory. The caller owns the clone.
+    pub fn clone_project(&self, source: &str, destination: &Path) -> Result<Project> {
+        self.shared.access(|_| Ok(()))?;
+        let target = destination
+            .to_str()
+            .ok_or_else(|| Error::Invalid("expected UTF-8 path".into()))?;
+        fs::create_dir(destination)?;
+        if let Err(error) = crate::worktree::git(Path::new("."), &["clone", "--", source, target]) {
+            // Remove only an empty directory created by this call.
+            let _ = fs::remove_dir(destination);
+            return Err(error);
+        }
+        self.open_project(destination)
+    }
+    /// Register a newly created scratch directory. Promotion preserves its path and identity.
+    pub fn create_scratch(&self, path: &Path) -> Result<Project> {
+        self.shared.access(|db| {
+            fs::create_dir(path)?;
+            let result = path
+                .canonicalize()
+                .map_err(Error::from)
+                .and_then(|root| db.project(&root));
+            if result.is_err() {
+                let _ = fs::remove_dir(path);
+            }
+            result
+        })
+    }
+    pub fn promote_scratch(&self, project: &ProjectId) -> Result<Project> {
+        let path = self.shared.access(|db| db.project_root(project))?;
+        crate::worktree::git(&path, &["init", "-q"])?;
+        self.open_project(path)
+    }
+    /// Allocate a detached checkout of the project's current HEAD.
+    pub fn allocate_workspace(&self, source: &ProjectId) -> Result<Project> {
+        self.allocate_workspace_at(source, "HEAD")
+    }
+    /// Resolve a Git revision in the source repository and allocate a detached checkout of its commit.
+    pub fn allocate_workspace_at(&self, source: &ProjectId, revision: &str) -> Result<Project> {
+        self.shared
+            .access(|db| db.allocate_workspace(source, revision, None))
+    }
+    /// Create a managed checkout and a new local branch at the resolved Git revision.
+    /// The checkout directory includes a readable name and a generated suffix.
+    pub fn allocate_workspace_on_branch(
+        &self,
+        source: &ProjectId,
+        revision: &str,
+        branch: WorktreeBranch<'_>,
+    ) -> Result<Project> {
+        self.shared
+            .access(|db| db.allocate_workspace(source, revision, Some(branch)))
+    }
+    /// Enumerate managed checkout reservations in the same Git repository as the source.
+    pub fn allocated_workspaces(&self, source: &ProjectId) -> Result<Vec<Project>> {
+        self.shared.access(|db| db.allocated_workspaces(source))
+    }
+    /// Release a managed checkout only after its last thread is removed.
+    pub fn release_workspace(&self, project: &ProjectId) -> Result<()> {
+        self.shared.access(|db| db.release_workspace(project))
+    }
+    /// Inspect unreferenced Huggler-managed checkouts without changing them.
+    ///
+    /// Only a checkout at its recorded base commit with no tracked, untracked or
+    /// ignored files is removable. Run this blocking filesystem and Git operation
+    /// off the host's UI or async executor thread.
+    pub fn inspect_orphaned_worktrees(&self) -> Result<OrphanedWorktreeReport> {
+        #[cfg(feature = "application")]
+        let _services = self.shared.services.lock().unwrap();
+        self.shared.access(|db| db.inspect_orphaned_worktrees())
+    }
+    /// Remove only unreferenced Huggler-managed checkouts proven unchanged.
+    ///
+    /// The host owns cleanup policy and scheduling. A typical host calls this at
+    /// startup, after deleting a thread, periodically for retries, or on explicit
+    /// user request. Changed and uncertain checkouts are retained and reported.
+    pub fn cleanup_orphaned_worktrees(&self) -> Result<OrphanedWorktreeReport> {
+        self.cleanup_orphaned_worktrees_excluding(&[])
+    }
+
+    /// Clean abandoned checkouts while protecting paths still used by the host.
+    pub fn cleanup_orphaned_worktrees_excluding(
+        &self,
+        protected: &[PathBuf],
+    ) -> Result<OrphanedWorktreeReport> {
+        #[cfg(feature = "application")]
+        let _services = self.shared.services.lock().unwrap();
+        self.shared
+            .access(|db| db.cleanup_orphaned_worktrees(protected))
+    }
+    /// Enumerate managed worktrees, including released checkouts with saved conversations.
+    pub fn managed_worktrees(&self) -> Result<Vec<ManagedWorktree>> {
+        self.shared.access(|db| db.managed_worktrees())
+    }
+
+    /// Inspect a managed checkout. The host may supply a commit independently verified as merged.
+    pub fn inspect_managed_worktree(
+        &self,
+        path: &Path,
+        merged_head: Option<&str>,
+    ) -> Result<OrphanedWorktreeEntry> {
+        let services = self.shared.services.lock().unwrap();
+        self.shared
+            .access(|db| db.inspect_managed_worktree(path, merged_head, &services))
+    }
+
+    /// Revalidate and release one managed checkout while keeping its conversation history.
+    pub fn reclaim_managed_worktree(
+        &self,
+        path: &Path,
+        merged_head: Option<&str>,
+    ) -> Result<OrphanedWorktreeEntry> {
+        let services = self.shared.services.lock().unwrap();
+        self.shared
+            .access(|db| db.reclaim_managed_worktree(path, merged_head, &services, false))
+    }
+
+    /// Reclaim a checkout only if every conversation using it has been deleted.
+    pub fn reclaim_unreferenced_worktree(
+        &self,
+        path: &Path,
+        merged_head: Option<&str>,
+    ) -> Result<OrphanedWorktreeEntry> {
+        let services = self.shared.services.lock().unwrap();
+        self.shared
+            .access(|db| db.reclaim_managed_worktree(path, merged_head, &services, true))
+    }
+
+    /// A released checkout needs to be restored before a new run can start.
+    pub fn worktree_released(&self, path: &Path) -> Result<bool> {
+        self.shared.access(|db| db.worktree_released(path))
+    }
+
+    /// Find the main checkout for the repository of a released or missing worktree.
+    pub fn released_worktree_source(&self, path: &Path) -> Result<PathBuf> {
+        self.shared.access(|db| db.released_worktree_source(path))
+    }
+
+    /// Recreate a released checkout on a new branch starting at the chosen revision.
+    pub fn restore_managed_worktree(
+        &self,
+        path: &Path,
+        source: &Path,
+        revision: &str,
+    ) -> Result<()> {
+        self.shared
+            .access(|db| db.restore_managed_worktree(path, source, revision))
+    }
+
+    pub fn workspace_setup_status(&self, project: &ProjectId) -> Result<Option<SetupStatus>> {
+        self.shared.access(|db| db.setup_status(project))
+    }
+}

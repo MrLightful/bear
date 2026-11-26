@@ -363,10 +363,25 @@ pub(super) fn release_after_failure(
     }
 }
 
-struct BranchPicker {
+pub(super) struct BranchPicker {
     branches: Vec<git::Branch>,
     selected: Option<String>,
     matches: Vec<usize>,
+}
+
+impl BranchPicker {
+    pub(super) fn new(branches: Vec<git::Branch>, selected: Option<String>) -> Self {
+        let matches = (0..branches.len()).collect();
+        Self {
+            branches,
+            selected,
+            matches,
+        }
+    }
+
+    pub(super) fn branch(&self, index: IndexPath) -> Option<&git::Branch> {
+        self.branches.get(*self.matches.get(index.row)?)
+    }
 }
 
 impl ListDelegate for BranchPicker {
@@ -623,15 +638,12 @@ impl Desktop {
             choices.insert(0, default.clone());
         }
         let list = cx.new(|cx| {
-            let matches = (0..choices.len()).collect();
-            let picker = BranchPicker {
-                branches: choices,
-                selected: self
-                    .launch_workspace
+            let picker = BranchPicker::new(
+                choices,
+                self.launch_workspace
                     .displayed_branch(mode)
                     .map(|branch| branch.reference.clone()),
-                matches,
-            };
+            );
             ListState::new(picker, window, cx).searchable(true)
         });
         cx.subscribe_in(&list, window, move |view, list, event, window, cx| {
@@ -641,10 +653,9 @@ impl Desktop {
             let picker = list.read(cx).delegate();
             match event {
                 ListEvent::Confirm(ix) => {
-                    let Some(index) = picker.matches.get(ix.row) else {
+                    let Some(branch) = picker.branch(*ix) else {
                         return;
                     };
-                    let branch = &picker.branches[*index];
                     match mode {
                         WorkspaceMode::Worktree => {
                             view.launch_workspace.base = Some(branch.clone());

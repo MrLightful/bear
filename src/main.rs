@@ -135,8 +135,11 @@ fn main() -> Result<()> {
             match settings::Preferences::load(&cleanup_state) {
                 Ok(prefs) if prefs.automatic_worktree_cleanup => {
                     let runtime = cleanup_runtime.clone();
-                    match tokio::task::spawn_blocking(move || runtime.cleanup_orphaned_worktrees())
-                        .await
+                    let protected = prefs.saved_project_roots();
+                    match tokio::task::spawn_blocking(move || {
+                        runtime.cleanup_orphaned_worktrees_excluding(&protected)
+                    })
+                    .await
                     {
                         Ok(Ok(_)) => {}
                         Ok(Err(error)) => {

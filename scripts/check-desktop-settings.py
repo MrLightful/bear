@@ -65,7 +65,7 @@ def check_worktrees(executable, state, env):
         {"resize": [1120, 740]}, {"click": "Worktrees"}, {"resize": [640, 440]},
         {"same_line": ["Show conversations", "Back to Settings"]},
         {"see": "automatic-cleanup/Off"}, {"click": "Clean up worktrees now"},
-        {"see": "No unused worktrees found."}, {"click": "automatic-cleanup/On"},
+        {"see": "No idle managed worktrees to clean up."}, {"click": "automatic-cleanup/On"},
         {"click": "Back to Settings"}, {"see": "Providers"}, {"click": "Back to workspace"},
     ], env)
     assert json.loads((state / "preferences.json").read_text())["automaticWorktreeCleanup"] is True
@@ -123,6 +123,49 @@ def check_worktrees(executable, state, env):
         {"next_prompt_answer": 1}, {"click": remove}, {"see": "Worktree removed."}, {"absent": finder},
     ], env)
     assert not worktree.exists()
+
+
+    run_window(executable, state, [
+        *launch_thread(checkout, "Release conversation", branch="release-conversation"),
+        {"click": "Message"}, {"type": "Save this transcript"}, {"click": "Send"},
+        {"see": "Ready/Release conversation/Completed"},
+        {"hover": "thread/Release conversation"}, {"click": "Settle/Release conversation"},
+        {"see": "Reopen conversation"},
+    ], env)
+    with sqlite3.connect(state / "huggler.sqlite3") as db:
+        path, = db.execute(
+            "SELECT p.root FROM thread t JOIN project p ON p.id=t.project WHERE t.name=?",
+            ("Release conversation",),
+        ).fetchone()
+    worktree = Path(path)
+    (worktree / "frames.ndjson").unlink(missing_ok=True)
+    run_window(executable, state, [
+        *open_worktrees, {"see": "Ready to remove"}, {"click": "Clean up worktrees now"},
+        {"see": "Removed 1."}, {"absent": f"Open in Finder/{path}"},
+        {"click": "Back to Settings"}, {"click": "Back to workspace"},
+        {"see": "Codex/reply Save this transcript"}, {"click": "Choose branch to reopen"},
+        {"see": "branch/main"}, {"type": "main"}, {"click": "branch/main"},
+        {"see": "Ready/Release conversation/Completed"},
+        {"see": "Codex/reply Save this transcript"},
+    ], env)
+    assert worktree.is_dir()
+    assert subprocess.check_output(
+        ["git", "-C", worktree, "branch", "--show-current"], text=True,
+    ).strip().startswith("huggler/resume-")
+
+
+    run_window(executable, state, [
+        {"hover": "thread/Release conversation"}, {"click": "Settle/Release conversation"},
+        {"see": "Reopen conversation"}, {"click": "History"}, {"click": "Search conversations"},
+        {"type": "Release"}, {"see": "thread/Release conversation"},
+        {"next_prompt_answer": 0}, {"click": "Delete conversation"},
+        {"see": "thread/Release conversation"},
+        {"next_prompt_answer": 1}, {"click": "Delete conversation"},
+        {"absent": "thread/Release conversation"},
+    ], env)
+    with sqlite3.connect(state / "huggler.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM thread").fetchone() == (0,)
+    assert worktree.is_dir()
 
 
 def check_projects(executable, root, env):

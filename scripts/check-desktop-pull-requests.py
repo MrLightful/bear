@@ -99,7 +99,7 @@ def github_response(fixture, query, variables):
             assert variables == {"owner": "fixture", "repo": "project", "head": "main", "ref": "refs/heads/main"}
             assert pr is None
             return {"data": {"repository": {"ref": None, "recent": {"nodes": []}}}}
-        assert variables["head"] in ("review", "other-topic")
+        assert variables["head"] in ("review", "other-topic", "merged-worktree")
         assert variables == {
             "owner": "fixture", "repo": "project",
             "head": variables["head"], "ref": f"refs/heads/{variables['head']}",
@@ -245,6 +245,7 @@ def check(binary, *, settlement_only=False):
             pr["headRefOid"] = commit("Review settlement")
             git("branch", "other-topic")
             check_settlement(binary, state, checkout, env, fixture, pr)
+            check_merged_worktree_cleanup(binary, root / "merged-worktree", root / "repository", env, fixture, pr)
             return
 
         # Keep one-shot PR-action fixtures independent of background policy polling.
@@ -471,7 +472,7 @@ def check_settlement(binary, state, checkout, env, fixture, pr):
     assert json.loads(preferences.read_text())["autoSettleMergedPrs"] is True
 
     for change in ("edit", "switch"):
-        show(dict(merged, fixture_change=change), {"see": "Merged"}, {"absent": "section/Settled/2"})
+        show(dict(merged, fixture_change=change), {"see": "Merged"}, {"absent": "Reopen conversation"})
         assert "fixture_change" not in json.loads(fixture.read_text())
         assert_settled(False)
         (checkout / "new-work.txt").unlink(missing_ok=True)
@@ -479,7 +480,8 @@ def check_settlement(binary, state, checkout, env, fixture, pr):
 
     show(dict(pr, state="CLOSED"), {"see": "PR closed"})
     assert_settled(False)
-    show(merged, {"see": "section/Settled/2"})
+    show(merged, {"see": "Reopen conversation"}, {"click": "History"},
+         {"see": "Settled/Background/Settled"}, {"see": "Settled/Selected/Settled"})
     assert_settled(True)
     show(pr, {"click": "Settings"}, {"click": "General"},
          {"click": "Auto-settle merged PRs"})
@@ -489,6 +491,29 @@ def check_settlement(binary, state, checkout, env, fixture, pr):
     show(merged, {"see": "Merged"})
     assert_settled(False)
     print("Merged PR settlement, background conversations, checkout races and opt-out passed")
+
+
+def check_merged_worktree_cleanup(binary, state, repository, env, fixture, pr):
+    fixture.write_text(json.dumps(pr))
+    run_window(binary, state, launch_thread(repository, "Merged worktree", branch="merged-worktree"), env)
+    with sqlite3.connect(state / "huggler.sqlite3") as db:
+        root, = db.execute("SELECT p.root FROM thread t JOIN project p ON p.id=t.project").fetchone()
+
+    def git(directory, *args):
+        return subprocess.check_output(["git", "-C", directory, *args], text=True).strip()
+
+    git(root, "commit", "--allow-empty", "-qm", "Merge this topic")
+    head = git(root, "rev-parse", "HEAD")
+    fixture.write_text(json.dumps(dict(pr, state="MERGED", headRefOid=head)))
+    run_window(binary, state, [
+        {"see": "Reopen conversation"}, {"click": "Settings"}, {"click": "Worktrees"},
+        {"see": "Ready to remove"}, {"click": "Clean up worktrees now"}, {"see": "Removed 1."},
+        {"click": "Back to Settings"}, {"click": "Back to workspace"},
+        {"see": "Choose branch to reopen"},
+    ], env)
+    assert not Path(root).exists()
+    assert git(repository, "rev-parse", "refs/heads/merged-worktree") == head
+    print("Verified merged worktree cleanup retained the conversation and its branch")
 
 
 if __name__ == "__main__":
