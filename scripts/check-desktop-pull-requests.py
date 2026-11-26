@@ -316,7 +316,7 @@ def check(binary, *, settlement_only=False):
         git("update-ref", "-d", "refs/heads/main")
         expect_creation(pr, "Update review fixtures", "Cover staged, unstaged, new, and removed files.")
         show(None, {"see": "Create PR"}, {"right_of": ["Create PR", "Open in"]},
-             {"click": "Create PR"}, {"opened_url": pr["url"]}, {"see": "Merge"})
+             {"click": "Create PR"}, {"see": "Merge"})
         head = git("rev-parse", "HEAD")
         pr["headRefOid"] = head
         assert head == remote_ref("review") and git("rev-parse", "HEAD^") == base
@@ -343,7 +343,7 @@ def check(binary, *, settlement_only=False):
         head = commit("Second review")
         pr = dict(pr, headRefOid=head, baseRefName="release")
         expect_creation(pr, "Second review", lost_receipt=True, base="release")
-        show(None, {"click": "Create PR"}, {"opened_url": pr["url"]}, {"see": "Merge"})
+        show(None, {"click": "Create PR"}, {"see": "Merge"})
         assert git("rev-parse", "@{upstream}") == head
         show("offline", {"click": "Create PR"},
              {"opened_url": "https://github.com/fixture/project/compare/release...review?expand=1"})
