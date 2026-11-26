@@ -275,11 +275,11 @@ impl Desktop {
             (Status::Create { branch, .. }, PrAction::Create) => {
                 let id = thread.id.clone();
                 let result = (|| {
-                    let text = crate::github::create_request(&self.workspaces[&id].root, branch)?;
+                    let action = crate::github::create_request(&self.workspaces[&id].root, branch)?;
                     let receipt = self.runtime.dispatch(Command {
                         id: CommandId(Uuid::new_v4().to_string()),
                         thread_id: id.clone(),
-                        action: Action::Enqueue { text },
+                        action,
                     })?;
                     receipt.run_id.context("Create PR did not enqueue a turn")
                 })();

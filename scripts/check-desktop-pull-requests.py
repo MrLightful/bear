@@ -335,7 +335,7 @@ def check(binary, *, settlement_only=False):
             show(None, {"see": "Create PR"}, {"right_of": ["Create PR", "Open in"]},
                  *send_message("Finish the pending review changes."),
                  {"contains": "Preparing the final review change."},
-                 {"click": "Create PR"}, {"see": "Merge"})
+                 {"click": "Create PR"}, {"see": "You//create-pr"}, {"see": "Merge"})
             queued.result()
         head = git("rev-parse", "HEAD")
         pr["headRefOid"] = head

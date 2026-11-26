@@ -126,7 +126,7 @@ struct PullRequestText {
     commit_subject: Option<String>,
 }
 
-pub fn create_request(root: &Path, branch: &git::GitHubBranch) -> Result<String> {
+pub fn create_request(root: &Path, branch: &git::GitHubBranch) -> Result<huggler::Action> {
     let target = PublishTarget {
         root: root.to_owned(),
         branch: branch.clone(),
@@ -144,12 +144,19 @@ pub fn create_request(root: &Path, branch: &git::GitHubBranch) -> Result<String>
             .collect::<Result<Vec<_>, _>>()?
             .join(" "))
     };
-    Ok(format!(
-        "Create a pull request from this conversation’s checkout. Follow the bundled Bear skill below.\n\n{}\n\nInspect:\n\n```sh\n{}\n```\n\nPublish (send the PR payload on stdin):\n\n```sh\n{}\n```",
-        include_str!("../assets/skills/create-pr/SKILL.md"),
+    let context = format!(
+        "Create a pull request from this conversation’s checkout. Run Inspect first and follow the bundled Bear skill returned in the `skill` field.\n\nInspect:\n\n```sh\n{}\n```\n\nPublish (send the PR payload on stdin):\n\n```sh\n{}\n```",
         command("--inspect-pull-request")?,
         command("--publish-pull-request")?,
-    ))
+    );
+    Ok(huggler::Action::EnqueueFiles {
+        text: "/create-pr".into(),
+        files: vec![huggler::Attachment {
+            name: "PR context.txt".into(),
+            mime: "text/plain".into(),
+            bytes: context.into_bytes(),
+        }],
+    })
 }
 
 impl PublishTarget {
@@ -173,6 +180,7 @@ pub fn inspect_pull_request(target_json: &str) -> Result<serde_json::Value> {
         "configured_base": target.configured_base,
         "head_oid": branch.local_oid,
         "pending_tree": pending.as_ref().map(git::PendingCommit::tree_oid),
+        "skill": include_str!("../assets/skills/create-pr/SKILL.md"),
     }))
 }
 
