@@ -74,6 +74,7 @@ fn history_at_bottom(scroll: &ScrollHandle) -> bool {
 struct Workspace {
     root: PathBuf,
     main_worktree: Option<PathBuf>,
+    worktree_initialized: bool,
     files: Entity<FileTree>,
     changes: Entity<Changes>,
     documents: DocumentTabs,
@@ -135,6 +136,7 @@ pub struct Desktop {
     workspace_tab: WorkspaceTab,
     focus: FocusHandle,
     workspaces: HashMap<ThreadId, Workspace>,
+    unsaved_worktree_history: HashSet<ThreadId>,
     runtime: Arc<Huggler>,
     executor: tokio::runtime::Handle,
     selection_file: PathBuf,
@@ -286,6 +288,7 @@ impl Desktop {
             workspace_tab: WorkspaceTab::Changes,
             focus: cx.focus_handle(),
             workspaces: HashMap::new(),
+            unsaved_worktree_history: HashSet::new(),
             runtime,
             executor,
             scratch_root: paths.scratch_dir(),
@@ -589,6 +592,10 @@ impl Desktop {
         Ok(())
     }
 
+    fn has_worktree_history(&self, id: &ThreadId) -> bool {
+        self.workspaces[id].worktree_initialized || self.unsaved_worktree_history.contains(id)
+    }
+
     fn ensure_workspace(
         &mut self,
         id: &ThreadId,
@@ -597,6 +604,11 @@ impl Desktop {
     ) -> huggler::Result<()> {
         if !self.workspaces.contains_key(id) {
             let root = self.runtime.thread_checkout(id)?;
+            let worktree_initialized = launch_workspace::has_worktree_record(
+                self.selection_file.parent().expect("state directory"),
+                id,
+                &root,
+            );
             let approvals_file = self.selection_file.with_file_name("file-approvals.json");
             let changes = cx.new(|cx| Changes::new(root.clone(), approvals_file, id.0.clone(), cx));
             let files = cx.new(|_| FileTree::new(root.clone()));
@@ -676,6 +688,7 @@ impl Desktop {
                 Workspace {
                     root,
                     main_worktree: None,
+                    worktree_initialized,
                     files,
                     changes,
                     documents: DocumentTabs::default(),
@@ -966,6 +979,11 @@ impl Desktop {
             .map(|project| project.root.clone())
             .collect();
         let scratch_root = self.scratch_root.clone();
+        let state = self
+            .selection_file
+            .parent()
+            .expect("state directory")
+            .to_owned();
         let scratch = checkout.as_os_str().is_empty();
         let runtime = self.runtime.clone();
         let id = ThreadId(saved_draft.unwrap_or_else(Uuid::new_v4).to_string());
@@ -975,7 +993,7 @@ impl Desktop {
         self.launching = Some(LaunchProgress {
             thread: id.clone(),
             title: name.clone(),
-            stage: (workspace_mode == WorkspaceMode::Worktree)
+            stage: (saved_draft.is_none() && workspace_mode == WorkspaceMode::Worktree)
                 .then_some(WorktreeStage::ResolveBase),
         });
         self.project_picker = None;
@@ -1007,7 +1025,10 @@ impl Desktop {
             // Launch and enqueue commit separately. A retry uses the existing
             // conversation and the same enqueue ID, even after an app restart.
             if saved_draft.is_some() && backlog::has_draft_conversation(&runtime, &thread)? {
-                return Ok((send(), None));
+                return Ok((send(), None, None));
+            }
+            if saved_draft.is_some() && workspace_mode == WorkspaceMode::Worktree {
+                let _ = report_stage.send(Some(WorktreeStage::ResolveBase));
             }
             let source = if scratch {
                 fs::create_dir_all(&scratch_root)?;
@@ -1045,9 +1066,10 @@ impl Desktop {
                     let _ = report_stage.send(stage);
                 },
             )?;
-            if allocated {
+            let setup_record = allocated.then(|| {
                 let _ = report_stage.send(Some(WorktreeStage::OpenConversation));
-            }
+                launch_workspace::record_worktree(&state, &thread, &project.root)
+            });
             if let Err(error) = runtime.dispatch(Command {
                 id: CommandId(Uuid::new_v4().to_string()),
                 thread_id: thread.clone(),
@@ -1061,6 +1083,9 @@ impl Desktop {
             }) {
                 let error = error.into();
                 return Err(if allocated {
+                    if let Some(Ok(path)) = setup_record {
+                        let _ = fs::remove_file(path);
+                    }
                     launch_workspace::release_after_failure(&runtime, &project, error)
                 } else {
                     error
@@ -1072,7 +1097,8 @@ impl Desktop {
                 && saved_roots.contains(&source_root)
                 && git::main_worktree(&project.root).is_ok_and(|main| main != source_root))
             .then_some((project.root, source_root));
-            anyhow::Ok((send(), worktree_project))
+            let history_error = setup_record.and_then(Result::err);
+            anyhow::Ok((send(), worktree_project, history_error))
         });
         cx.spawn_in(window, async move |view, cx| {
             while let Some(stage) = stages.recv().await {
@@ -1093,9 +1119,12 @@ impl Desktop {
                     v.backlog.sending = None;
                 }
                 match result {
-                    Ok((sent, worktree_project)) => {
+                    Ok((sent, worktree_project, history_error)) => {
                         if sent.is_err() {
                             v.pending_first_messages.remove(&id);
+                        }
+                        if history_error.is_some() {
+                            v.unsaved_worktree_history.insert(id.clone());
                         }
                         let saved = worktree_project.map(|(worktree, root)| {
                             v.settings.update(cx, |settings, cx| {
@@ -1134,10 +1163,15 @@ impl Desktop {
                             v.error = Some(format!(
                                 "Message sent. Could not remove its Backlog draft. {error}"
                             ));
-                        } else if v.error.is_none()
-                            && let Some(Err(error)) = saved
-                        {
-                            v.error = Some(format!("{error:#}"));
+                        } else if v.error.is_none() {
+                            v.error = saved
+                                .and_then(Result::err)
+                                .map(|error| format!("{error:#}"))
+                                .or_else(|| {
+                                    history_error.map(|error| {
+                                        format!("Could not save worktree setup history. {error:#}")
+                                    })
+                                });
                         }
                     }
                     Err(error) => {
@@ -1454,9 +1488,15 @@ impl Desktop {
             .bg(cx.theme().muted.opacity(0.55))
     }
 
-    fn launch_form(&self, compact: bool, window: &Window, cx: &Context<Self>) -> AnyElement {
+    fn launch_form(
+        &self,
+        compact: bool,
+        width: Pixels,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         if let Some(progress) = &self.launching {
-            return progress.render(cx).into_any_element();
+            return self.launch_history(progress, width, cx).into_any_element();
         }
         let check = self
             .model_catalogs
@@ -1743,13 +1783,13 @@ impl Desktop {
             view.report(result, cx);
         }));
         let pending = thread.permissions.len() + thread.questions.len();
-        let fresh = last_run.is_none()
+        let fresh = !self.has_worktree_history(&thread.id)
+            && last_run.is_none()
             && thread.history.messages.is_empty()
             && self.before.is_none()
             && pending == 0
             && !busy;
-        // Keep the left rail clear of the centered text in narrow windows.
-        let transcript_width = (width - px(24.)).clamp(px(0.), px(800.));
+        let transcript_width = Self::transcript_width(width);
         let width = width.min(px(800.));
         let scroll_to_end_visibility = (!fresh).then(|| {
             window.use_keyed_state(
@@ -2220,9 +2260,12 @@ impl Render for Desktop {
                                         .into_any_element(),
                                 }
                             }
-                            None => {
-                                self.launch_form(viewport - left_width * left < 800., window, cx)
-                            }
+                            None => self.launch_form(
+                                viewport - left_width * left < 800.,
+                                conversation_width,
+                                window,
+                                cx,
+                            ),
                         }
                     })
                     .when_some(
