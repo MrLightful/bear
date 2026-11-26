@@ -43,7 +43,7 @@ for line in sys.stdin:
              arguments={"query": "Review notes"}, error={"message": "No matching document"})
     time.sleep(8)
     complete("compact", "contextCompaction")
-    complete("patch", "fileChange", status="completed", changes=[{"path": "desktop/src/conversation.rs"}])
+    complete("patch", "fileChange", status="completed", changes=[{"path": "src/conversation.rs"}])
     complete("reply", "agentMessage", phase="final_answer",
              text="## Review summary\n\nThe transcript keeps the focus on the conversation. Tool activity "
                   "is grouped by turn, and attachments open inline.\n\n"

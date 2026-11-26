@@ -74,7 +74,7 @@ fn main() -> Result<()> {
             Some(format!("Could not read settings. {error}")),
         ),
     };
-    let mut options = paths.runtime_options();
+    let mut options = paths.runtime_options()?;
     options.agent_tools = true;
     options.prompt_suggestions = std::env::var("HUGGLER_PROMPT_SUGGESTIONS").as_deref() == Ok("1");
     options.codex.workspace_write = true;

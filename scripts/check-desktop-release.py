@@ -14,7 +14,7 @@ from desktop_check import huggler_package, installer, isolated_env
 def launch_and_quit(app, case):
     env = isolated_env(case)
     # Use the ordinary application entry point with a fresh home and no overrides.
-    database = Path(env["HOME"]) / ".huggler/userdata/huggler.sqlite3"
+    database = Path(env["HOME"]) / ".bear/userdata/huggler.sqlite3"
     process = subprocess.Popen([app / "Contents/MacOS/bear"], env=env, cwd="/")
     print(f"Checking Bear (PID {process.pid})", flush=True)
     try:

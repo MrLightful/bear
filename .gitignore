@@ -1,5 +1,4 @@
 /target/
-/desktop/target/
 
 __pycache__/
-/desktop/gen/
+/gen/

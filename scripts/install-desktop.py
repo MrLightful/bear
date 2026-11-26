@@ -22,7 +22,7 @@ def install(destination, *, identifier="dev.huggler.stage2", qualification=False
     if destination.exists():
         raise SystemExit(f"Select an unused install location: {destination}")
     target = ROOT / "target" / "desktop"
-    manifest = ROOT / "desktop/Cargo.toml"
+    manifest = ROOT / "Cargo.toml"
     metadata = json.loads(subprocess.check_output([
         "cargo", "metadata", "--locked", "--no-deps", "--format-version", "1", "--manifest-path", manifest
     ]))

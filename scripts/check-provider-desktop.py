@@ -244,7 +244,7 @@ def check_mcp_settings(executable, tmp, env):
         {"click": "Confirm MCP removal"}, {"absent": "MCP settings/test-tools/Enabled"},
         {"click": "Remove MCP/notes.v2"}, {"click": "Confirm MCP removal"},
         {"see": "No user MCP servers"},
-        {"click": "Add MCP server"}, {"type": "huggler"},
+        {"click": "Add MCP server"}, {"type": "bear"},
         {"click": "Server URL"}, {"type": "https://example.org/mcp"},
         {"click": "Save MCP server"}, {"see": "MCP settings error"},
         {"click": "Cancel MCP edit"}, {"see": "No user MCP servers"},

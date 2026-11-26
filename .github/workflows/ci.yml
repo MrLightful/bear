@@ -30,13 +30,12 @@ jobs:
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: desktop
           cache-bin: false
       - name: Check Rust formatting
-        run: cargo fmt --manifest-path desktop/Cargo.toml -- --check
+        run: cargo fmt --manifest-path Cargo.toml -- --check
       - name: Check the production build
-        run: cargo check --locked --manifest-path desktop/Cargo.toml
+        run: cargo check --locked --manifest-path Cargo.toml
       - name: Lint the desktop qualification build
-        run: cargo clippy --locked --manifest-path desktop/Cargo.toml --features qualification --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path Cargo.toml --features qualification --all-targets -- -D warnings
       - name: Run desktop unit tests
-        run: cargo test --locked --manifest-path desktop/Cargo.toml --features qualification
+        run: cargo test --locked --manifest-path Cargo.toml --features qualification

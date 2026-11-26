@@ -5,9 +5,9 @@
 Use Xcode, Python 3.12 or later, and a macOS GUI session. Run the commands from the Bear checkout. Build the qualification binary once for the [desktop coding checks](desktop-coding.md#reproduce-the-desktop-check) and the history check.
 
 ```sh
-cargo fmt --manifest-path desktop/Cargo.toml -- --check
-cargo clippy --locked --manifest-path desktop/Cargo.toml --features qualification --all-targets -- -D warnings
-cargo build --locked --manifest-path desktop/Cargo.toml --features qualification --target-dir target/desktop
+cargo fmt --manifest-path Cargo.toml -- --check
+cargo clippy --locked --manifest-path Cargo.toml --features qualification --all-targets -- -D warnings
+cargo build --locked --manifest-path Cargo.toml --features qualification --target-dir target/desktop
 python3 scripts/check-desktop-history.py target/desktop/debug/bear
 ```
 
@@ -89,7 +89,7 @@ On macOS, install the Rust license documentation and notice generator, fetch the
 ```sh
 rustup component add rust-docs
 cargo install --locked cargo-about --version 0.9.1 --features cli
-cargo fetch --locked --manifest-path desktop/Cargo.toml
+cargo fetch --locked --manifest-path Cargo.toml
 python3 scripts/check-desktop-release.py target/distribution
 ```
 

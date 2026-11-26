@@ -99,7 +99,7 @@ def acp(flavor):
             assert p["sessionId"] == native
             prompt = p["prompt"][0]["text"]
             supports_http = init["agentCapabilities"].get("mcpCapabilities", {}).get("http", False)
-            assert [s["name"] for s in servers] == (["huggler"] if supports_http else [])
+            assert [s["name"] for s in servers] == (["bear"] if supports_http else [])
             if prompt.startswith("interrupt "):
                 _, thread, run = prompt.split()
                 result = mcp(servers[0], "tools/call", {"name": "thread_interrupt", "arguments": {
@@ -196,7 +196,7 @@ def muse():
             else:
                 assert p["sessionId"] == session["sessionId"]
             assert p["modelId"] == session["modelId"]
-            check_tools(p["config"]["mcpServers"]["huggler"])
+            check_tools(p["config"]["mcpServers"]["bear"])
             result = rows[1]["result"]
         elif method == "turn/start":
             prompt = p["input"][0]["text"]

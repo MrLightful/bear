@@ -49,9 +49,10 @@ while True:
             frame["id"] = actual["id"]
         if method == "initialize":
             # Huggler identifies its own client and doesn't register an MCP Apps renderer.
-            frame["params"]["clientInfo"] = case["clientInfo"] if "clientInfo" in case else {
+            frame_client = case["clientInfo"] if "clientInfo" in case else {
                 "name": "huggler", "title": "Huggler", "version": case["version"]
             }
+            frame["params"]["clientInfo"] = frame_client
             del frame["params"]["capabilities"]["extensions"]
         if method == "turn/start":
             frame["params"]["sandboxPolicy"] = ({"type": "workspaceWrite", "networkAccess": False}
@@ -60,11 +61,13 @@ while True:
                 frame["params"]["approvalPolicy"] = "on-request"
         if method == "thread/start":
             if case.get("agentTools"):
-                config = actual["params"]["config"]["mcp_servers.huggler"]
+                server_name = frame_client["name"]
+                server_key = f"mcp_servers.{server_name}"
+                config = actual["params"]["config"][server_key]
                 url = urlsplit(config["url"])
                 assert url.scheme == "http" and url.hostname == "127.0.0.1" and url.port
                 assert url.path == "/mcp" and os.environ["HUGGLER_MCP_TOKEN"]
-                frame["params"]["config"]["mcp_servers.huggler"] = {
+                frame["params"]["config"][server_key] = {
                     "url": config["url"], "bearer_token_env_var": "HUGGLER_MCP_TOKEN", "required": True,
                 }
             if case.get("approvals"):

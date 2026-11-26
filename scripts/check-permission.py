@@ -8,8 +8,9 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import tomllib
 
-from desktop_check import ROOT, huggler_package, install_check, isolated_env, launch_thread, run_window, send_message
+from desktop_check import ROOT, install_check, isolated_env, launch_thread, run_window, send_message
 
 
 def prepare_replay(root):
@@ -22,8 +23,9 @@ def prepare_replay(root):
             entry["frame"]["result"]["config"]["model"] = records[0]["metadata"]["model"]
     fixture = root / "replay.ndjson"
     fixture.write_text("\n".join(map(json.dumps, records)))
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     (root / "case.json").write_text(json.dumps({
-        "fixture": str(fixture), "version": huggler_package()["version"],
+        "fixture": str(fixture), "clientInfo": {"name": "bear", "title": "Bear", "version": version},
         "start": 1, "approvals": True, "workspaceWrite": True, "agentTools": True
     }))
     peer = root / "codex"
