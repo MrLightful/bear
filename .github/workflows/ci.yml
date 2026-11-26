@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTUP_TOOLCHAIN: '1.94.1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+
+jobs:
+  desktop:
+    name: Desktop (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: desktop
+          cache-bin: false
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path desktop/Cargo.toml -- --check
+      - name: Check the production build
+        run: cargo check --locked --manifest-path desktop/Cargo.toml
+      - name: Lint the desktop qualification build
+        run: cargo clippy --locked --manifest-path desktop/Cargo.toml --features qualification --all-targets -- -D warnings
+      - name: Run desktop unit tests
+        run: cargo test --locked --manifest-path desktop/Cargo.toml --features qualification
