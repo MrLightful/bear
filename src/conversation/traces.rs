@@ -3,6 +3,7 @@ use gpui_component::scroll::ScrollableElement;
 use huggler::{ActivityKind, ActivityStatus, ToolTrace, ToolTraceSource};
 
 const PAGE_SIZE: usize = 50;
+const ROW_HEIGHT: Pixels = px(42.);
 const FILTERS: [(Option<ToolTraceSource>, &str); 3] = [
     (None, "All"),
     (Some(ToolTraceSource::Mcp), "MCP"),
@@ -13,7 +14,7 @@ pub(super) struct Traces {
     source: Option<ToolTraceSource>,
     limit: usize,
     entries: huggler::Result<Vec<ToolTrace>>,
-    scroll: ScrollHandle,
+    scroll: UniformListScrollHandle,
 }
 
 impl Default for Traces {
@@ -22,7 +23,7 @@ impl Default for Traces {
             source: None,
             limit: PAGE_SIZE,
             entries: Ok(Vec::new()),
-            scroll: ScrollHandle::new(),
+            scroll: UniformListScrollHandle::new(),
         }
     }
 }
@@ -113,7 +114,8 @@ impl Desktop {
         }
     }
 
-    pub(super) fn trace_panel(&self, traces: &Traces, cx: &Context<Self>) -> Div {
+    pub(super) fn trace_panel(&self, thread: &ThreadId, cx: &Context<Self>) -> Div {
+        let traces = &self.workspaces[thread].traces;
         let filters = h_flex()
             .px_2()
             .py_1()
@@ -146,7 +148,12 @@ impl Desktop {
                                 if traces.source != source {
                                     traces.source = source;
                                     traces.limit = PAGE_SIZE;
-                                    traces.scroll.set_offset(point(px(0.), px(0.)));
+                                    traces
+                                        .scroll
+                                        .0
+                                        .borrow()
+                                        .base_handle
+                                        .set_offset(point(px(0.), px(0.)));
                                     view.refresh_trace_list();
                                     cx.notify();
                                 }
@@ -155,59 +162,76 @@ impl Desktop {
                 )
             }));
         let entries = match &traces.entries {
-            Err(error) => hint(format!("Could not load traces. {error}"), cx).p_3(),
+            Err(error) => hint(format!("Could not load traces. {error}"), cx)
+                .p_3()
+                .into_any_element(),
             Ok(rows) if rows.is_empty() => {
                 let message = match traces.source {
                     Some(ToolTraceSource::Mcp) => "No MCP tool calls yet",
                     Some(ToolTraceSource::Standard) => "No standard tool calls yet",
                     _ => "No recorded tool calls",
                 };
-                control!(message, hint(message, cx).p_3())
+                control!(message, hint(message, cx).p_3()).into_any_element()
             }
-            Ok(rows) => v_flex()
-                .py_1()
-                .px_1()
-                .children(
-                    rows.iter()
-                        .take(traces.limit)
-                        .map(|trace| self.trace_row(trace, cx)),
-                )
-                .when(rows.len() > traces.limit, |list| {
-                    list.child(control!(
-                        "Load older traces",
-                        Button::new("load-older-traces")
-                            .ghost()
-                            .small()
-                            .label("Load older traces")
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                if let Some(thread) = &view.current {
-                                    view.workspaces
-                                        .get_mut(&thread.id)
-                                        .expect("selected workspace")
-                                        .traces
-                                        .limit += PAGE_SIZE;
-                                    view.refresh_trace_list();
-                                    cx.notify();
+            Ok(rows) => {
+                let thread = thread.clone();
+                let list = uniform_list(
+                    "trace-list",
+                    rows.len().min(traces.limit + 1),
+                    cx.processor(move |view, range: std::ops::Range<usize>, _, cx| {
+                        let traces = &view.workspaces[&thread].traces;
+                        let Ok(rows) = &traces.entries else {
+                            return Vec::new();
+                        };
+                        range
+                            .map(|index| {
+                                if index == traces.limit {
+                                    view.load_older_traces_row(cx)
+                                } else {
+                                    view.trace_row(&rows[index], cx)
                                 }
-                            }))
-                    ))
-                }),
-        };
-        v_flex().size_full().child(filters).child(
-            div()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .child(
-                    div()
-                        .id("trace-list")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&traces.scroll)
-                        .child(entries),
+                            })
+                            .collect()
+                    }),
                 )
-                .vertical_scrollbar(&traces.scroll),
-        )
+                .size_full()
+                .p_1()
+                .with_sizing_behavior(ListSizingBehavior::Auto)
+                .track_scroll(traces.scroll.clone());
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(list)
+                    .vertical_scrollbar(&traces.scroll)
+                    .into_any_element()
+            }
+        };
+        v_flex()
+            .size_full()
+            .child(filters.flex_shrink_0())
+            .child(entries)
+    }
+
+    fn load_older_traces_row(&self, cx: &Context<Self>) -> Div {
+        v_flex().h(ROW_HEIGHT).justify_center().child(control!(
+            "Load older traces",
+            Button::new("load-older-traces")
+                .ghost()
+                .small()
+                .label("Load older traces")
+                .on_click(cx.listener(|view, _, _, cx| {
+                    if let Some(thread) = &view.current {
+                        view.workspaces
+                            .get_mut(&thread.id)
+                            .expect("selected workspace")
+                            .traces
+                            .limit += PAGE_SIZE;
+                        view.refresh_trace_list();
+                        cx.notify();
+                    }
+                }))
+        ))
     }
 
     fn trace_row(&self, trace: &ToolTrace, cx: &Context<Self>) -> Div {
@@ -227,7 +251,7 @@ impl Desktop {
             Button::new(key)
                 .ghost()
                 .small()
-                .h(px(42.))
+                .h(ROW_HEIGHT)
                 .w_full()
                 .min_w_0()
                 .justify_start()
@@ -269,5 +293,7 @@ impl Desktop {
                     view.open_document(document.clone(), window, cx);
                 })),
         )
+        .h(ROW_HEIGHT)
+        .w_full()
     }
 }

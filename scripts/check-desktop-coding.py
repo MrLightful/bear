@@ -501,8 +501,46 @@ def check_transcript(binary):
     print("Native transcript activity, tool trace filters and saved command output passed")
 
 
+def check_virtual_lists(binary):
+    with tempfile.TemporaryDirectory(prefix="huggler virtual lists ") as tmp:
+        root = Path(tmp)
+        checkout = root / "checkout"
+        subprocess.run(["git", "init", "-q", checkout], check=True)
+        for index in range(80):
+            (checkout / f"file-{index:02}.txt").write_text(f"Fixture {index}\n")
+        env = isolated_env(root)
+        env["HUGGLER_CODEX"] = str(ROOT / "tests/fixtures/desktop-transcript-peer.py")
+        env["HUGGLER_TRACE_LIST_FIXTURE"] = "1"
+        # The sidebar ends above the 32 px collapsed Terminal header.
+        list_end = {"click_at": [1116, 700]}
+        run_window(binary, root / "state", [
+            *launch_thread(checkout, "Virtual lists", current=True),
+            {"resize": [1120, 740]}, "show_scrollbars", {"click": "Changes tab"},
+            {"see": "Changed/file-00.txt"}, {"absent": "Changed/file-79.txt"},
+            list_end,
+            {"absent": "Changed/file-00.txt"}, {"see": "Changed/file-79.txt"},
+            {"click": "All changes"}, {"click": "Change filter/Uncommitted files"},
+            {"see": "Uncommitted files"}, {"see": "Changed/file-00.txt"},
+            {"click": "Uncommitted files"}, {"click": "Change filter/All changes"},
+            {"see": "All changes"}, {"click": "Changed/file-79.txt"},
+            {"see": "Diff tab/All changes/file-79.txt"},
+            {"click": "Close Diff tab/All changes/file-79.txt"},
+            *send_message("Record traces."),
+            {"click": "Traces tab"}, {"see": "Trace/fixture command 54"},
+            {"absent": "Load older traces"},
+            list_end,
+            {"absent": "Trace/fixture command 54"}, {"click": "Load older traces"},
+            list_end,
+            {"click": "Trace/fixture command 0"}, {"see": "Trace Output/Trace result 0"},
+            {"click": "Trace filter/Std"}, {"see": "Trace/fixture command 54"},
+            {"absent": "Trace/fixture command 0"},
+        ], env)
+    print("Virtualized Changes and Traces scroll, open rows, and load older traces")
+
+
 if __name__ == "__main__":
     binary = Path(sys.argv[1]).resolve()
     check(binary)
     check_editor_reload(binary)
     check_transcript(binary)
+    check_virtual_lists(binary)

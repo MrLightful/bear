@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Script a mixed transcript over Codex app-server stdio."""
 import json
+import os
 import sys
 import time
 
@@ -32,6 +33,12 @@ for line in sys.stdin:
         result = {}
     emit(id=frame["id"], result=result)
     if method != "turn/start":
+        continue
+    if os.environ.get("HUGGLER_TRACE_LIST_FIXTURE") == "1":
+        for index in range(55):
+            complete(f"trace-{index}", "commandExecution", command=f"fixture command {index}",
+                     status="completed", aggregatedOutput=f"Trace result {index}")
+        emit(method="turn/completed", params={"threadId": session, "turn": {"id": turn, "status": "completed"}})
         continue
     complete("intro", "agentMessage", phase="commentary",
              text="I’ll start with the conversation layout.")
