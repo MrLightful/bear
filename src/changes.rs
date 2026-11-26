@@ -3,7 +3,7 @@ mod approvals;
 use crate::{
     git::{self, ChangeScope, File, FileChange, LineCounts, PreparedRevert},
     open_in::{OpenIn, file_menu},
-    ui::{hint, label},
+    ui::{hint, keyboard_scroll_viewport, label},
 };
 use anyhow::Context as _;
 pub(crate) use approvals::ReviewRow;
@@ -806,7 +806,7 @@ impl Changes {
 }
 
 impl Render for Changes {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let counts = self
             .rows()
             .iter()
@@ -884,16 +884,20 @@ impl Render for Changes {
                         }),
                     )
                     .size_full()
-                    .p_1()
                     .with_sizing_behavior(ListSizingBehavior::Auto)
                     .track_scroll(scroll.clone());
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .child(list)
-                        .vertical_scrollbar(scroll)
-                        .into_any_element()
+                    control!(
+                        "Changes list",
+                        keyboard_scroll_viewport("changes-viewport", scroll, window, cx)
+                            .relative()
+                            .size_full()
+                            .child(list)
+                            .vertical_scrollbar(scroll)
+                    )
+                    .flex_1()
+                    .min_h_0()
+                    .m_1()
+                    .into_any_element()
                 }
             })
     }

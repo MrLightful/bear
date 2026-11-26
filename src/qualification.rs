@@ -17,7 +17,7 @@ use std::{
 pub enum Step {
     Click(String),
     Hover(String),
-    ClickAt([u16; 2]),
+    ClickFromBottomRight(String, [f32; 2]),
     ShowScrollbars,
     DragX(String, i16),
     DragY(String, i16),
@@ -250,8 +250,12 @@ fn advance(step: &Step, window: &mut Window, cx: &mut App) -> bool {
             };
             post_mouse(step, bounds.center(), window)
         }
-        Step::ClickAt([x, y]) => {
-            post_mouse(step, point(px(f32::from(*x)), px(f32::from(*y))), window)
+        Step::ClickFromBottomRight(key, [x, y]) => {
+            let Some(bounds) = controls.get(key.as_str()) else {
+                return false;
+            };
+            let position = bounds.bottom_right() - point(px(*x), px(*y));
+            post_mouse(step, position, window)
         }
         Step::Key(key) => window.dispatch_keystroke(
             Keystroke::parse(key).expect("valid qualification keystroke"),

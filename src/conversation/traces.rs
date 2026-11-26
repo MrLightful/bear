@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::keyboard_scroll_viewport;
 use gpui_component::scroll::ScrollableElement;
 use huggler::{ActivityKind, ActivityStatus, ToolTrace, ToolTraceSource};
 
@@ -114,7 +115,12 @@ impl Desktop {
         }
     }
 
-    pub(super) fn trace_panel(&self, thread: &ThreadId, cx: &Context<Self>) -> Div {
+    pub(super) fn trace_panel(
+        &self,
+        thread: &ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let traces = &self.workspaces[thread].traces;
         let filters = h_flex()
             .px_2()
@@ -148,12 +154,7 @@ impl Desktop {
                                 if traces.source != source {
                                     traces.source = source;
                                     traces.limit = PAGE_SIZE;
-                                    traces
-                                        .scroll
-                                        .0
-                                        .borrow()
-                                        .base_handle
-                                        .set_offset(point(px(0.), px(0.)));
+                                    traces.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
                                     view.refresh_trace_list();
                                     cx.notify();
                                 }
@@ -174,12 +175,12 @@ impl Desktop {
                 control!(message, hint(message, cx).p_3()).into_any_element()
             }
             Ok(rows) => {
-                let thread = thread.clone();
+                let row_thread = thread.clone();
                 let list = uniform_list(
                     "trace-list",
                     rows.len().min(traces.limit + 1),
                     cx.processor(move |view, range: std::ops::Range<usize>, _, cx| {
-                        let traces = &view.workspaces[&thread].traces;
+                        let traces = &view.workspaces[&row_thread].traces;
                         let Ok(rows) = &traces.entries else {
                             return Vec::new();
                         };
@@ -195,16 +196,25 @@ impl Desktop {
                     }),
                 )
                 .size_full()
-                .p_1()
                 .with_sizing_behavior(ListSizingBehavior::Auto)
                 .track_scroll(traces.scroll.clone());
-                div()
+                control!(
+                    "Traces list",
+                    keyboard_scroll_viewport(
+                        SharedString::from(format!("traces-viewport-{thread}")),
+                        &traces.scroll,
+                        window,
+                        cx,
+                    )
                     .relative()
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .child(list)
                     .vertical_scrollbar(&traces.scroll)
-                    .into_any_element()
+                )
+                .flex_1()
+                .min_h_0()
+                .m_1()
+                .into_any_element()
             }
         };
         v_flex()

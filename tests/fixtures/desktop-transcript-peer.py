@@ -38,6 +38,7 @@ for line in sys.stdin:
         for index in range(55):
             complete(f"trace-{index}", "commandExecution", command=f"fixture command {index}",
                      status="completed", aggregatedOutput=f"Trace result {index}")
+        complete("reply", "agentMessage", phase="final_answer", text="Recorded 55 tool calls.")
         emit(method="turn/completed", params={"threadId": session, "turn": {"id": turn, "status": "completed"}})
         continue
     complete("intro", "agentMessage", phase="commentary",

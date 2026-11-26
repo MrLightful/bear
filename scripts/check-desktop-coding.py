@@ -511,13 +511,13 @@ def check_virtual_lists(binary):
         env = isolated_env(root)
         env["HUGGLER_CODEX"] = str(ROOT / "tests/fixtures/desktop-transcript-peer.py")
         env["HUGGLER_TRACE_LIST_FIXTURE"] = "1"
-        # The sidebar ends above the 32 px collapsed Terminal header.
-        list_end = {"click_at": [1116, 700]}
+        changes_end = {"click_from_bottom_right": ["Changes list", [4, 8]]}
+        traces_end = {"click_from_bottom_right": ["Traces list", [4, 8]]}
         run_window(binary, root / "state", [
             *launch_thread(checkout, "Virtual lists", current=True),
             {"resize": [1120, 740]}, "show_scrollbars", {"click": "Changes tab"},
             {"see": "Changed/file-00.txt"}, {"absent": "Changed/file-79.txt"},
-            list_end,
+            changes_end,
             {"absent": "Changed/file-00.txt"}, {"see": "Changed/file-79.txt"},
             {"click": "All changes"}, {"click": "Change filter/Uncommitted files"},
             {"see": "Uncommitted files"}, {"see": "Changed/file-00.txt"},
@@ -528,12 +528,16 @@ def check_virtual_lists(binary):
             *send_message("Record traces."),
             {"click": "Traces tab"}, {"see": "Trace/fixture command 54"},
             {"absent": "Load older traces"},
-            list_end,
+            traces_end,
             {"absent": "Trace/fixture command 54"}, {"click": "Load older traces"},
-            list_end,
+            traces_end,
             {"click": "Trace/fixture command 0"}, {"see": "Trace Output/Trace result 0"},
             {"click": "Trace filter/Std"}, {"see": "Trace/fixture command 54"},
             {"absent": "Trace/fixture command 0"},
+            {"click_from_bottom_right": ["Traces list", [0.5, 8]]},
+            {"key": "pagedown"}, {"absent": "Trace/fixture command 54"},
+            {"key": "end"}, {"see": "Load older traces"},
+            {"key": "home"}, {"see": "Trace/fixture command 54"},
         ], env)
     print("Virtualized Changes and Traces scroll, open rows, and load older traces")
 
