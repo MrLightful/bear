@@ -71,13 +71,18 @@ impl Settings {
         &self.prefs.projects
     }
 
-    #[cfg(target_os = "macos")]
-    pub(crate) fn worktree_project(&self, worktree: &Path) -> Option<&SavedProject> {
-        let root = self.prefs.worktree_projects.get(worktree)?;
+    pub(crate) fn checkout_project(&self, checkout: &Path) -> Option<&SavedProject> {
         self.prefs
             .projects
             .iter()
-            .find(|project| project.root == *root)
+            .find(|project| project.root == checkout)
+            .or_else(|| {
+                let root = self.prefs.worktree_projects.get(checkout)?;
+                self.prefs
+                    .projects
+                    .iter()
+                    .find(|project| project.root == *root)
+            })
     }
 
     pub(crate) fn save_worktree_project(

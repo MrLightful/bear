@@ -130,6 +130,38 @@ impl ListDelegate for ProjectPicker {
 }
 
 impl Desktop {
+    pub(super) fn resolve_main_worktree(&self, thread: ThreadId, cx: &mut Context<Self>) {
+        let root = self.workspaces[&thread].root.clone();
+        let lookup = cx.background_spawn(async move { git::main_worktree(&root).ok() });
+        cx.spawn(async move |view, cx| {
+            let main_worktree = lookup.await;
+            let _ = view.update(cx, |view, cx| {
+                if let Some(workspace) = view.workspaces.get_mut(&thread) {
+                    workspace.main_worktree = main_worktree;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn workspace_project_name(&self, workspace: &Workspace, cx: &App) -> Option<String> {
+        let settings = self.settings.read(cx);
+        settings
+            .checkout_project(&workspace.root)
+            .map(|project| project.name.clone())
+            .or_else(|| {
+                let main = workspace.main_worktree.as_deref()?;
+                settings
+                    .checkout_project(main)
+                    .map(|project| project.name.clone())
+                    .or_else(|| {
+                        main.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+            })
+    }
+
     pub(super) fn launch_checkout(&self, cx: &App) -> PathBuf {
         if let Some(path) = &self.picked_checkout {
             return path.clone();
