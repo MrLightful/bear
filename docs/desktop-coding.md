@@ -115,7 +115,7 @@ The provider heading shows the setup state, detected executable version, and ava
 
 New conversations start with Codex selected. Use the composer’s provider and model picker to choose another provider before starting a conversation. Under **Appearance**, select **System**, **Light** or **Dark** to change the color theme immediately. Use the back arrow to retrace your steps to the conversation or launch form, including any draft. When you open settings from the model picker or terminal, the arrow takes you straight back to the workspace. **⌘N** opens the new conversation form.
 
-Under **Storage**, use **Clean up now** to remove unused worktrees that have no local changes or new commits. Turn on **Automatic cleanup** to check immediately, at startup, and hourly.
+Open **Settings → Worktrees** to see local linked checkouts for your projects and conversations. Use **Open in Finder** to inspect a checkout, or **Remove** to release an unused, unchanged worktree created for a conversation. **Clean up now** removes unchanged worktrees left behind by older runs. Turn on **Automatic cleanup** to run that check immediately, at startup, and hourly.
 
 Select a provider and use **Models** to show or hide models in the conversation picker. Models appear in descending order by name until you reorder them with the arrows. Preferences apply to that provider instance across checkouts. The first option follows the provider’s default. It shows the model name when available and **Automatic** when the model is unknown. Model discovery uses the current checkout when available.
 

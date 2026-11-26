@@ -11,10 +11,12 @@ mod project_actions;
 pub(crate) mod projects;
 mod providers;
 mod setup;
+mod worktrees;
 
 pub(crate) use setup::default_executable;
 
 use crate::conversation::ProviderCatalog;
+use crate::paths::StoragePaths;
 use crate::ui::{choice, heading, hint, label, section_title};
 use advanced::{RuntimeFields, RuntimePreferences};
 use anyhow::{Context as _, Result, ensure};
@@ -27,10 +29,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     v_flex,
 };
-use huggler::{
-    Huggler, HugglerOptions, Provider, ProviderInstanceId,
-    workspace::{OrphanedWorktreeOutcome, OrphanedWorktreeReport},
-};
+use huggler::{Huggler, HugglerOptions, Provider, ProviderInstanceId};
 pub(crate) use model_presets::{ModelPreset, STANDARD_SPEED};
 pub(crate) use models::ModelPreferences;
 use providers::ProviderSettings;
@@ -200,7 +199,7 @@ enum Page {
     ProjectActions,
     #[cfg(unix)]
     Machines,
-    Storage,
+    Worktrees,
 }
 
 impl Page {
@@ -213,7 +212,7 @@ impl Page {
             Self::Providers => "Providers",
             Self::Projects => "Projects",
             Self::ProjectActions => "Project actions",
-            Self::Storage => "Storage",
+            Self::Worktrees => "Worktrees",
             #[cfg(unix)]
             Self::Machines => "Machines",
         }
@@ -250,8 +249,7 @@ pub struct Settings {
     environment_rows: Option<Vec<environment::EnvironmentRow>>,
     pub focus: FocusHandle,
     error: Option<String>,
-    cleanup_running: bool,
-    cleanup_status: Option<String>,
+    worktrees: worktrees::Inventory,
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -263,7 +261,7 @@ impl Settings {
 
     pub fn new(
         prefs: Preferences,
-        state: PathBuf,
+        paths: &StoragePaths,
         runtime: Arc<Huggler>,
         load_error: Option<String>,
         _executor: tokio::runtime::Handle,
@@ -290,7 +288,7 @@ impl Settings {
             page: Page::default(),
             entry_page: Page::default(),
             prefs,
-            state,
+            state: paths.state_dir(),
             runtime,
             input,
             providers,
@@ -308,8 +306,7 @@ impl Settings {
             environment_rows: None,
             focus: cx.focus_handle(),
             error: load_error,
-            cleanup_running: false,
-            cleanup_status: None,
+            worktrees: worktrees::Inventory::new(paths.worktrees_dir()),
         }
     }
 
@@ -351,6 +348,9 @@ impl Settings {
             return;
         }
         self.page = page;
+        if page == Page::Worktrees {
+            self.refresh_worktrees(cx);
+        }
         self.preset_catalogs.clear();
         if page == Page::DefaultModels {
             self.request_preset_catalogs(false, cx);
@@ -503,62 +503,6 @@ impl Settings {
         prefs.set_executable(self.providers.selected.as_str(), path);
         Ok(true)
     }
-
-    fn cleanup_worktrees(&mut self, cx: &mut Context<Self>) {
-        if self.cleanup_running {
-            return;
-        }
-        self.cleanup_running = true;
-        self.cleanup_status = None;
-        let runtime = self.runtime.clone();
-        let job = cx.background_spawn(async move { runtime.cleanup_orphaned_worktrees() });
-        cx.spawn(async move |view, cx| {
-            let result = job.await;
-            let _ = view.update(cx, |view, cx| {
-                view.cleanup_running = false;
-                match result {
-                    Ok(report) => {
-                        view.cleanup_status = Some(cleanup_summary(&report));
-                    }
-                    Err(error) => {
-                        view.error = Some(format!("Could not clean up worktrees. {error}"));
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-}
-
-fn cleanup_summary(report: &OrphanedWorktreeReport) -> String {
-    let removed = report
-        .entries
-        .iter()
-        .filter(|entry| entry.outcome == OrphanedWorktreeOutcome::Removed)
-        .count();
-    let kept = report
-        .entries
-        .iter()
-        .filter(|entry| entry.outcome == OrphanedWorktreeOutcome::Kept)
-        .count();
-    let failed = report
-        .entries
-        .iter()
-        .filter(|entry| entry.outcome == OrphanedWorktreeOutcome::Failed)
-        .count();
-    if report.entries.is_empty() {
-        return "No unused worktrees found.".into();
-    }
-    let mut parts = vec![format!("Removed {removed}")];
-    if kept > 0 {
-        parts.push(format!("kept {kept} for review"));
-    }
-    if failed > 0 {
-        parts.push(format!("retry later {failed}"));
-    }
-    format!("{}.", parts.join(", "))
 }
 
 fn validate_program(path: &Path) -> Result<()> {
@@ -705,7 +649,11 @@ impl Settings {
                         IconName::SquareTerminal,
                         "Connect to a Git checkout over SSH",
                     ),
-                    (Page::Storage, IconName::Folder, "Clean up unused worktrees"),
+                    (
+                        Page::Worktrees,
+                        IconName::Folder,
+                        "View checkouts and clean up unused worktrees",
+                    ),
                 ],
             ))
     }
@@ -802,55 +750,6 @@ impl Settings {
             )
             .child(hint(path_hint, cx))
     }
-
-    fn storage(&self, cx: &Context<Self>) -> Div {
-        let automatic_cleanup = self.prefs.automatic_worktree_cleanup;
-        v_flex()
-            .gap_2()
-            .child(section_title("Automatic cleanup"))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .flex_wrap()
-                    .children([(false, "Off"), (true, "On")].map(|(enabled, name)| {
-                        control!(
-                            format!("automatic-cleanup/{name}"),
-                            choice(name, name, automatic_cleanup == enabled)
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                if view.persist(
-                                    Preferences {
-                                        automatic_worktree_cleanup: enabled,
-                                        ..view.prefs.clone()
-                                    },
-                                    cx,
-                                ) && enabled
-                                {
-                                    view.cleanup_worktrees(cx);
-                                }
-                            }))
-                        )
-                    })),
-            )
-            .child(hint(
-                "When on, Bear checks at startup and hourly. Only unused worktrees without files or new commits are removed.",
-                cx,
-            ))
-            .child(h_flex().mt_2().child(control!(
-                "Clean up worktrees now",
-                Button::new("cleanup-worktrees")
-                    .small()
-                    .label(if self.cleanup_running {
-                        "Cleaning…"
-                    } else {
-                        "Clean up now"
-                    })
-                    .disabled(self.cleanup_running)
-                    .on_click(cx.listener(|view, _, _, cx| view.cleanup_worktrees(cx)))
-            )))
-            .when_some(self.cleanup_status.clone(), |controls, status| {
-                controls.child(control!(status.clone(), hint(status, cx)))
-            })
-    }
 }
 
 fn settings_column() -> Div {
@@ -867,7 +766,7 @@ impl Settings {
             Page::Providers => self.render_provider_panel(cx),
             Page::Projects => self.projects_panel(cx),
             Page::ProjectActions => self.project_actions_panel(cx),
-            Page::Storage => self.storage(cx),
+            Page::Worktrees => self.worktrees_panel(cx),
             #[cfg(unix)]
             Page::Machines => self.machines_panel(cx),
         };

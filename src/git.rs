@@ -130,13 +130,62 @@ pub fn checkout_root(path: &Path) -> Result<PathBuf> {
     file_path(output.strip_suffix(b"\n").unwrap_or(&output))
 }
 
+fn worktree_list(root: &Path) -> Result<Vec<u8>> {
+    execute(git(root).args(["worktree", "list", "--porcelain", "-z"]))
+}
+
+fn worktree_record_path(field: Option<&[u8]>) -> Result<PathBuf> {
+    let path = field
+        .and_then(|field| field.strip_prefix(b"worktree "))
+        .context("Git returned no worktree path")?;
+    file_path(path)
+}
+
 pub fn main_worktree(root: &Path) -> Result<PathBuf> {
-    let output = execute(git(root).args(["worktree", "list", "--porcelain", "-z"]))?;
-    let entry = output.split(|byte| *byte == 0).next().unwrap_or_default();
-    let path = entry
-        .strip_prefix(b"worktree ")
-        .context("Git returned no worktree")?;
-    Ok(file_path(path)?.canonicalize()?)
+    let output = worktree_list(root)?;
+    Ok(worktree_record_path(output.split(|byte| *byte == 0).next())?.canonicalize()?)
+}
+
+pub(crate) struct LinkedWorktree {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+pub(crate) fn linked_worktrees(root: &Path) -> Result<(PathBuf, Vec<LinkedWorktree>)> {
+    let output = worktree_list(root)?;
+    let mut records = output.split(|byte| *byte == 0).peekable();
+    let mut worktrees = Vec::new();
+    while records.peek().is_some_and(|field| !field.is_empty()) {
+        let mut fields = records.by_ref().take_while(|field| !field.is_empty());
+        let path = worktree_record_path(fields.next())?;
+        let branch = fields
+            .find_map(|field| field.strip_prefix(b"branch refs/heads/"))
+            .map(|branch| String::from_utf8_lossy(branch).into_owned());
+        worktrees.push(LinkedWorktree { path, branch });
+        // Consume the record delimiter even when the branch was found early.
+        fields.for_each(drop);
+    }
+    let mut worktrees = worktrees.into_iter();
+    let main = worktrees.next().context("Git returned no worktree")?;
+    Ok((main.path, worktrees.collect()))
+}
+
+/// Git status can omit tracked changes hidden by index flags.
+pub(crate) fn ensure_worktree_removal_safe(root: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(metadata.is_dir(), "The checkout is not a directory.");
+    let tracked = execute(git(root).args(["ls-files", "-v", "-z"]))?;
+    ensure!(
+        !tracked.split(|byte| *byte == 0).any(|record| record
+            .first()
+            .is_some_and(|flag| flag.is_ascii_lowercase() || *flag == b'S')),
+        "The checkout has tracked files hidden from Git status."
+    );
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
