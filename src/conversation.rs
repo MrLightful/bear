@@ -23,7 +23,7 @@ mod traces;
 mod transcript;
 
 use attachments::Attachments;
-use backlog::{Backlog, LaunchDraft};
+use backlog::{Backlog, DraftError, LaunchDraft};
 pub(crate) use document_tabs::DOCUMENT_CONTEXT;
 use document_tabs::{Document, DocumentTabs};
 use file_tree::{FileAction, FileTree};
@@ -1154,9 +1154,10 @@ impl Desktop {
                             sent
                         })();
                         if let (Some(draft), Err(error)) = (failed_draft, &result) {
-                            v.backlog
-                                .errors
-                                .insert(draft, format!("Could not send draft. {error}"));
+                            v.backlog.errors.insert(
+                                draft,
+                                DraftError::Delivery(format!("Could not send draft. {error}")),
+                            );
                         } else {
                             v.report(result, cx);
                         }
@@ -1187,7 +1188,7 @@ impl Desktop {
                         }
                         let error = format!("Could not open {launch_name}. {error}");
                         if let Some(draft) = saved_draft {
-                            v.backlog.errors.insert(draft, error);
+                            v.backlog.errors.insert(draft, DraftError::Delivery(error));
                         } else {
                             v.error = Some(error);
                         }
@@ -1508,12 +1509,6 @@ impl Desktop {
         let text = self.starter.read(cx).value();
         let empty_message = text.trim().is_empty() && self.starter_attachments.is_empty(&text);
         let draft_unavailable = empty_message || browsing || self.starter_attachments.loading;
-        let project_row = h_flex()
-            .w_full()
-            .justify_between()
-            .gap_2()
-            .child(self.project_control(window, cx))
-            .child(self.save_backlog_button(draft_unavailable, cx));
         if !self.launch_setup {
             let title = self.launch_project_name(cx).map_or_else(
                 || "What should we build?".into(),
@@ -1530,6 +1525,7 @@ impl Desktop {
                         .child(self.model_control(cx))
                         .child(div().flex_1().min_w_0())
                         .child(self.mcp_status_control(window, cx))
+                        .child(self.save_backlog_button(draft_unavailable, cx))
                         .child(
                             self.send_controls(
                                 &self.starter_attachments,
@@ -1554,7 +1550,7 @@ impl Desktop {
                 .p_4()
                 .gap_2()
                 .child(heading(title).text_xl().mb_1())
-                .child(project_row)
+                .child(h_flex().child(self.project_control(window, cx)))
                 .child(composer)
                 .when(!checkout_empty, |body| {
                     body.child(self.launch_checkout_controls(cx))
@@ -1582,6 +1578,7 @@ impl Desktop {
                     .flex_wrap()
                     .child(self.model_control(cx))
                     .child(div().flex_1().min_w_0())
+                    .child(self.save_backlog_button(draft_unavailable, cx))
                     .child(
                         self.send_controls(
                             &self.starter_attachments,
@@ -1673,7 +1670,7 @@ impl Desktop {
                 body.child(self.launch_checkout_controls(cx))
             })
             .child(context)
-            .child(project_row)
+            .child(h_flex().child(self.project_control(window, cx)))
             .child(
                 h_flex()
                     .gap_2()

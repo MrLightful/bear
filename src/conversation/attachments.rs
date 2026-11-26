@@ -16,6 +16,17 @@ const CHIP_SIDE_PADDING: f32 = 0.375;
 
 pub(super) const MESSAGE_LINE_HEIGHT: Pixels = px(22.);
 
+pub(super) fn saved_caption<'a>(text: &str, files: impl Iterator<Item = &'a str>) -> String {
+    let mut caption = String::new();
+    let mut end = 0;
+    for (range, _) in references(text, files.enumerate()) {
+        caption.push_str(&text[end..range.start]);
+        end = range.end;
+    }
+    caption.push_str(&text[end..]);
+    caption
+}
+
 fn split_caption_before_last_line<'a>(
     caption: &'a str,
     width: Pixels,

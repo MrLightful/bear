@@ -1,6 +1,5 @@
 use super::*;
 use anyhow::{Context as _, ensure};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use huggler::Attachment;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -44,9 +43,22 @@ pub(super) struct Backlog {
     pub open: bool,
     pub sending: Option<Uuid>,
     entries: Vec<(Uuid, SavedDraft)>,
-    pub errors: HashMap<Uuid, String>,
+    pub errors: HashMap<Uuid, DraftError>,
     edit: Option<DraftEdit>,
     expanded_details: HashSet<Uuid>,
+}
+
+pub(super) enum DraftError {
+    Delivery(String),
+    Edit(String),
+}
+
+impl DraftError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Delivery(message) | Self::Edit(message) => message,
+        }
+    }
 }
 
 struct DraftEdit {
@@ -268,7 +280,7 @@ impl Desktop {
                 .small()
                 .ghost()
                 .icon(IconName::GalleryVerticalEnd)
-                .tooltip("Save to Backlog")
+                .label("Save to Backlog")
                 .disabled(disabled || self.launch_workspace.loading_branches())
                 .on_click(cx.listener(|view, _, window, cx| {
                     if let Err(error) = view.save_to_backlog(window, cx) {
@@ -281,14 +293,19 @@ impl Desktop {
     }
 
     fn send_backlog(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if self.backlog.sending.is_some() || self.launching.is_some() {
+        if self.backlog.sending.is_some()
+            || self.launching.is_some()
+            || self.backlog.edit.as_ref().is_some_and(|edit| edit.id == id)
+        {
             return;
         }
         self.backlog.errors.remove(&id);
         match SavedDraft::read(&self.backlog_path(id)).context("Could not read the saved draft") {
             Ok((draft, attachments)) => self.start_launch(draft, attachments, Some(id), window, cx),
             Err(error) => {
-                self.backlog.errors.insert(id, format!("{error:#}"));
+                self.backlog
+                    .errors
+                    .insert(id, DraftError::Delivery(format!("{error:#}")));
                 cx.notify();
             }
         }
@@ -303,6 +320,9 @@ impl Desktop {
         self.backlog.entries.retain(|(entry, _)| *entry != id);
         self.backlog.errors.remove(&id);
         self.backlog.expanded_details.remove(&id);
+        if self.backlog.edit.as_ref().is_some_and(|edit| edit.id == id) {
+            self.backlog.edit = None;
+        }
         Ok(())
     }
 
@@ -315,14 +335,18 @@ impl Desktop {
             Ok(true) => {
                 self.backlog.errors.insert(
                     id,
-                    "This draft already has a conversation. Retry delivery with the saved message."
-                        .into(),
+                    DraftError::Delivery(
+                        "This draft already has a conversation. Retry sending the saved message."
+                            .into(),
+                    ),
                 );
                 cx.notify();
                 return;
             }
             Err(error) => {
-                self.backlog.errors.insert(id, error.to_string());
+                self.backlog
+                    .errors
+                    .insert(id, DraftError::Edit(error.to_string()));
                 cx.notify();
                 return;
             }
@@ -426,9 +450,9 @@ impl Desktop {
                 .iter()
                 .any(|(entry, draft)| *entry == id && !draft.files.is_empty());
         v_flex()
-            .gap_2()
-            .child(field("Draft title", &edit.name))
+            .gap_3()
             .child(field("Draft message", &edit.message))
+            .child(field("Conversation title (optional)", &edit.name))
             .child(
                 h_flex()
                     .justify_end()
@@ -455,9 +479,12 @@ impl Desktop {
                             .disabled(!can_save)
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if let Err(error) = view.save_draft_edit(window, cx) {
-                                    view.backlog
-                                        .errors
-                                        .insert(id, format!("Could not save changes. {error:#}"));
+                                    view.backlog.errors.insert(
+                                        id,
+                                        DraftError::Edit(format!(
+                                            "Could not save changes. {error:#}"
+                                        )),
+                                    );
                                     cx.notify();
                                 }
                             }))
@@ -472,12 +499,6 @@ impl Desktop {
         cx: &Context<Self>,
     ) -> Div {
         let count = self.backlog.entries.len();
-        let empty = count == 0;
-        let draft_count = if count == 1 {
-            "1 saved draft".into()
-        } else {
-            format!("{count} saved drafts")
-        };
         v_flex()
             .flex_1()
             .min_h_0()
@@ -501,89 +522,131 @@ impl Desktop {
                     .overflow_y_scroll()
                     .child(
                         v_flex()
-                            // Give wrapped text its final width during scroll extent calculation.
-                            .w(width.min(px(736.)))
+                            // Measure wrapped rows against the pane, including inside the scroller.
+                            .w(width.min(px(768.)))
                             .max_w_full()
                             .flex_shrink_0()
                             .px_4()
-                            .pt_5()
+                            .pt_6()
                             .pb_8()
-                            .gap_3()
+                            .gap_4()
                             .child(
                                 h_flex()
-                                    .gap_3()
                                     .justify_between()
-                                    .pb_3()
-                                    .child(heading(if empty { "Saved drafts".into() } else { draft_count }))
-                                    .child(control!(
-                                        "Create a draft",
-                                        Button::new("create-draft")
-                                            .small()
-                                            .outline()
-                                            .icon(IconName::Plus)
-                                            .label("New draft")
-                                            .on_click(cx.listener(|view, _, window, cx| {
-                                                view.new_conversation(false, window, cx)
-                                            }))
-                                    )),
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .min_w_0()
+                                            .child(heading("Saved drafts").text_xl())
+                                            .when(count > 0, |title| {
+                                                title.child(
+                                                    hint(count.to_string(), cx)
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded_full()
+                                                        .bg(cx.theme().muted),
+                                                )
+                                            }),
+                                    )
+                                    .when(count > 0, |header| {
+                                        header.child(self.new_draft_button(false, cx))
+                                    }),
                             )
-                            .when(empty, |list| {
-                                list.child(
-                                    v_flex()
-                                        .gap_1()
-                                        .py_6()
-                                        .child(label("No saved drafts"))
-                                        .child(hint(
-                                            "Use Save to Backlog in the composer to keep a draft for later.",
-                                            cx,
-                                        )),
-                                )
-                            })
-                            .children(
-                                self.backlog
-                                    .entries
-                                    .iter()
-                                    .map(|(id, draft)| self.backlog_row(*id, draft, cx)),
+                            .child(
+                                v_flex()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().muted.opacity(0.25))
+                                    .when(count == 0, |list| list.child(self.empty_backlog(cx)))
+                                    .children(self.backlog.entries.iter().enumerate().map(
+                                        |(index, (id, draft))| {
+                                            self.backlog_row(*id, draft, cx).when(
+                                                index > 0,
+                                                |row| {
+                                                    row.border_t_1().border_color(cx.theme().border)
+                                                },
+                                            )
+                                        },
+                                    )),
                             ),
                     ),
             )
     }
 
-    fn draft_details(&self, launch: &LaunchDraft, cx: &Context<Self>) -> Div {
-        let scratch = launch.checkout.as_os_str().is_empty();
-        let workspace = if scratch {
-            "Scratch workspace".into()
+    fn new_draft_button(&self, empty: bool, cx: &Context<Self>) -> Div {
+        control!(
+            "Create a draft",
+            Button::new("create-draft")
+                .small()
+                .when(empty, |button| button.primary())
+                .when(!empty, |button| button.outline())
+                .icon(IconName::Plus)
+                .label("New draft")
+                .on_click(
+                    cx.listener(|view, _, window, cx| { view.new_conversation(false, window, cx) })
+                )
+        )
+        .flex_shrink_0()
+    }
+
+    fn empty_backlog(&self, cx: &Context<Self>) -> Div {
+        v_flex()
+            .items_center()
+            .text_center()
+            .px_5()
+            .py_10()
+            .gap_4()
+            .child(
+                h_flex()
+                    .size_10()
+                    .justify_center()
+                    .rounded_lg()
+                    .bg(cx.theme().muted)
+                    .child(
+                        Icon::new(IconName::GalleryVerticalEnd)
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(heading("No drafts yet"))
+                    .child(
+                        hint(
+                            "Use Save to Backlog in the composer to keep a message for later.",
+                            cx,
+                        )
+                        .max_w(px(280.)),
+                    ),
+            )
+            .child(self.new_draft_button(true, cx))
+    }
+
+    fn draft_details(
+        &self,
+        id: Uuid,
+        draft: &SavedDraft,
+        message: &str,
+        editing: bool,
+        cx: &Context<Self>,
+    ) -> Div {
+        let launch = &draft.launch;
+        let branch = if launch.checkout.as_os_str().is_empty() {
+            None
         } else {
-            let project = launch
-                .project_name
-                .clone()
-                .or_else(|| {
+            match launch.workspace_mode {
+                WorkspaceMode::Current => launch.selected_branch.as_ref().map(|b| b.name.clone()),
+                WorkspaceMode::Worktree => Some(
                     launch
-                        .checkout
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                })
-                .unwrap_or_else(|| "Git checkout".into());
-            format!("{project} · {}", launch.workspace_mode.label())
+                        .selected_branch
+                        .as_ref()
+                        .map_or_else(|| "Repository default".into(), |branch| branch.name.clone()),
+                ),
+            }
         };
-        let branch = (!scratch)
-            .then(|| {
-                let mut options = Vec::new();
-                if let Some(branch) = &launch.selected_branch {
-                    options.push(match launch.workspace_mode {
-                        WorkspaceMode::Worktree => branch.base_label(),
-                        WorkspaceMode::Current => branch.name.clone(),
-                    });
-                } else if launch.workspace_mode == WorkspaceMode::Worktree {
-                    options.push("Default base branch".into());
-                }
-                if launch.workspace_mode == WorkspaceMode::Worktree && !launch.branch.is_empty() {
-                    options.push(format!("New branch {}", launch.branch));
-                }
-                options
-            })
-            .filter(|options| !options.is_empty())
-            .map(|options| options.join(" · "));
         let provider = self
             .runtime
             .output()
@@ -601,18 +664,86 @@ impl Desktop {
             });
         }
         v_flex()
-            .gap_1()
-            .py_2()
-            .when(launch.name != launch.message.trim(), |details| {
-                details.child(draft_option("Title", launch.name.clone(), cx))
+            .gap_4()
+            .mx_4()
+            .pb_4()
+            .pt_4()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .when(!editing && !message.trim().is_empty(), |panel| {
+                panel.child(
+                    v_flex()
+                        .gap_1()
+                        .child(crate::ui::section_title("Message"))
+                        .child(draft_prompt_block(message.to_owned(), cx)),
+                )
             })
-            .child(draft_option("Workspace", workspace, cx))
-            .when_some(branch, |details, branch| {
-                details.child(draft_option("Branch", branch, cx))
+            .when(!draft.files.is_empty(), |panel| {
+                panel.child(
+                    v_flex()
+                        .gap_1()
+                        .child(crate::ui::section_title("Attachments"))
+                        .children(draft.files.iter().map(|file| {
+                            h_flex()
+                                .items_start()
+                                .gap_2()
+                                .child(crate::file_icons::icon(
+                                    Path::new(&file.name),
+                                    cx.theme().muted_foreground,
+                                ))
+                                .child(hint(file.name.clone(), cx).min_w_0())
+                        })),
+                )
             })
-            .child(draft_option("Model", format!("{provider} · {model}"), cx))
-            .when(!model_options.is_empty(), |details| {
-                details.child(draft_option("Options", model_options.join(" · "), cx))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(crate::ui::section_title("Launch settings").mb_1())
+                    .when(!editing && !launch.name.trim().is_empty(), |details| {
+                        details.child(control!(
+                            format!("Draft title/{}", launch.name),
+                            draft_option("Title", launch.name.clone(), cx)
+                        ))
+                    })
+                    .when(!launch.checkout.as_os_str().is_empty(), |details| {
+                        details.child(draft_option(
+                            "Checkout",
+                            launch.checkout.display().to_string(),
+                            cx,
+                        ))
+                    })
+                    .when_some(branch, |details, branch| {
+                        let label = match launch.workspace_mode {
+                            WorkspaceMode::Worktree => "Base branch",
+                            WorkspaceMode::Current => "Branch",
+                        };
+                        details.child(draft_option(label, branch, cx))
+                    })
+                    .when(
+                        launch.workspace_mode == WorkspaceMode::Worktree
+                            && !launch.checkout.as_os_str().is_empty()
+                            && !launch.branch.is_empty(),
+                        |details| {
+                            details.child(draft_option("New branch", launch.branch.clone(), cx))
+                        },
+                    )
+                    .child(draft_option("Model", format!("{provider} · {model}"), cx))
+                    .when(!model_options.is_empty(), |details| {
+                        details.child(draft_option("Options", model_options.join(" · "), cx))
+                    }),
+            )
+            .when(!editing, |panel| {
+                panel.child(h_flex().justify_end().child(control!(
+                        format!("Delete draft/{}", launch.name),
+                        Button::new((ElementId::from(id), "delete"))
+                            .small()
+                            .ghost()
+                            .label("Delete draft")
+                            .disabled(self.backlog.sending == Some(id))
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.confirm_delete_draft(id, window, cx)
+                            }))
+                    )))
             })
     }
 
@@ -626,166 +757,224 @@ impl Desktop {
             .and_then(|progress| progress.stage);
         let error = self.backlog.errors.get(&id);
         let action = if sending {
-            "Sending…"
-        } else if error.is_some() {
+            "Starting…"
+        } else if matches!(error, Some(DraftError::Delivery(_))) {
             "Retry"
         } else {
-            "Send"
+            "Start"
         };
         let expanded = self.backlog.expanded_details.contains(&id);
-        let group = SharedString::from(format!("draft-{id}"));
         let edit = self.backlog.edit.as_ref().filter(|edit| edit.id == id);
-        let menu_view = cx.weak_entity();
-        let can_edit = self.backlog.edit.is_none();
-        let controls = h_flex()
-            .gap_1()
-            .flex_shrink_0()
-            .child(control!(
-                format!("Send draft/{}", launch.name),
-                Button::new((ElementId::from(id), "send"))
-                    .small()
-                    .primary()
-                    .icon(IconName::ArrowUp)
-                    .label(action)
-                    .opacity(if sending { 1. } else { 0. })
-                    .group_hover(group.clone(), |style| style.opacity(1.))
-                    .focus(|style| style.opacity(1.))
-                    .disabled(self.backlog.sending.is_some() || self.launching.is_some())
-                    .on_click(
-                        cx.listener(move |view, _, window, cx| view.send_backlog(id, window, cx))
-                    )
-            ))
-            .child(control!(
-                format!("Draft actions/{}", launch.name),
-                Button::new((ElementId::from(id), "actions"))
-                    .small()
-                    .ghost()
-                    .icon(IconName::Ellipsis)
-                    .tooltip("Draft actions")
-                    .opacity(0.)
-                    .group_hover(group.clone(), |style| style.opacity(1.))
-                    .focus(|style| style.opacity(1.))
-                    .disabled(sending)
-                    .dropdown_menu_with_anchor(Corner::BottomRight, move |menu, _, _| {
-                        let edit_view = menu_view.clone();
-                        let delete_view = menu_view.clone();
-                        menu.item(
-                            PopupMenuItem::element(|_, _| {
-                                control!("Edit draft", div().child("Edit draft"))
-                            })
-                            .disabled(!can_edit)
-                            .on_click(move |_, window, cx| {
-                                let _ = edit_view
-                                    .update(cx, |view, cx| view.start_draft_edit(id, window, cx));
-                            }),
-                        )
-                        .item(
-                            PopupMenuItem::element(|_, _| {
-                                control!("Delete draft", div().child("Delete draft"))
-                            })
-                            .on_click(move |_, window, cx| {
-                                let _ = delete_view.update(cx, |view, cx| {
-                                    view.confirm_delete_draft(id, window, cx)
-                                });
-                            }),
-                        )
-                    })
-            ));
-        let card =
-            v_flex()
-                .id(id)
-                .gap_1()
-                .p_4()
-                .rounded_xl()
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().muted.opacity(0.42))
-                .group(group)
-                .child(if let Some(edit) = edit {
-                    self.draft_editor(edit, cx).mb_2()
-                } else if launch.message.trim().is_empty() {
-                    div().text_base().mb_2().child("Attachment-only draft")
-                } else {
-                    div()
-                        .text_base()
-                        .line_height(px(24.))
-                        .mb_2()
-                        .child(launch.message.clone())
+        let message = attachments::saved_caption(
+            &launch.message,
+            draft.files.iter().map(|file| file.name.as_str()),
+        );
+        let preview = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        let date = draft
+            .created
+            .with_timezone(&chrono::Local)
+            .format("%b %-d, %Y");
+        let attachment_count = match draft.files.len() {
+            0 => None,
+            1 => Some("1 attachment".into()),
+            count => Some(format!("{count} attachments")),
+        };
+        let workspace = if launch.checkout.as_os_str().is_empty() {
+            "Scratch workspace".into()
+        } else {
+            let project = launch
+                .project_name
+                .clone()
+                .or_else(|| {
+                    launch
+                        .checkout
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
                 })
-                .when(!draft.files.is_empty(), |card| {
-                    card.child(h_flex().flex_wrap().gap_1().mb_2().children(
-                        draft.files.iter().map(|file| {
-                            h_flex()
-                                .gap_1()
-                                .max_w_full()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .px_2()
-                                .py_1()
-                                .child(crate::file_icons::icon(
-                                    Path::new(&file.name),
-                                    cx.theme().muted_foreground,
-                                ))
-                                .child(hint(file.name.clone(), cx).min_w_0())
-                        }),
+                .unwrap_or_else(|| "Git checkout".into());
+            format!("{project} · {}", launch.workspace_mode.label())
+        };
+        let metadata = h_flex()
+            .flex_wrap()
+            .justify_between()
+            .gap_2()
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .min_w_0()
+                    .max_w_full()
+                    .child(draft_meta(
+                        if launch.checkout.as_os_str().is_empty() {
+                            IconName::SquareTerminal
+                        } else {
+                            IconName::Folder
+                        },
+                        workspace,
+                        cx,
                     ))
-                })
-                .child(
+                    .when_some(attachment_count, |metadata, count| {
+                        metadata.child(draft_meta(IconName::File, count, cx))
+                    }),
+            )
+            .child(hint(date.to_string(), cx).text_xs().whitespace_nowrap());
+        let actions = h_flex()
+            .flex_wrap()
+            .justify_between()
+            .gap_2()
+            .pt_2()
+            .child(control!(
+                format!("Draft details/{}", launch.name),
+                Button::new((ElementId::from(id), "details"))
+                    .small()
+                    .compact()
+                    .ghost()
+                    .icon(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .label(if expanded {
+                        "Hide details"
+                    } else {
+                        "View draft"
+                    })
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        if !view.backlog.expanded_details.remove(&id) {
+                            view.backlog.expanded_details.insert(id);
+                        }
+                        cx.notify();
+                    }))
+            ))
+            .when(edit.is_none(), |actions| {
+                actions.child(
                     h_flex()
-                        .justify_between()
+                        .flex_wrap()
                         .gap_2()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .pt_2()
+                        .max_w_full()
                         .child(control!(
-                            format!("Draft details/{}", launch.name),
-                            Button::new((ElementId::from(id), "details"))
+                            format!("Edit draft/{}", launch.name),
+                            Button::new((ElementId::from(id), "edit"))
                                 .small()
                                 .compact()
                                 .ghost()
-                                .icon(if expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .child(hint("Draft details", cx))
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    if !view.backlog.expanded_details.remove(&id) {
-                                        view.backlog.expanded_details.insert(id);
-                                    }
-                                    cx.notify();
+                                .label("Edit")
+                                .disabled(sending || self.backlog.edit.is_some())
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.start_draft_edit(id, window, cx)
                                 }))
                         ))
-                        .when(edit.is_none(), |footer| footer.child(controls)),
+                        .child(control!(
+                            format!("Send draft/{}", launch.name),
+                            Button::new((ElementId::from(id), "send"))
+                                .small()
+                                .primary()
+                                .icon(IconName::ArrowRight)
+                                .label(action)
+                                .loading(sending)
+                                .disabled(
+                                    self.backlog.sending.is_some() || self.launching.is_some()
+                                )
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.send_backlog(id, window, cx)
+                                }))
+                        )),
                 )
-                .when(expanded, |card| {
-                    card.child(control!(
-                        format!("Draft details panel/{}", launch.name),
-                        self.draft_details(launch, cx)
-                    ))
-                })
-                .when_some(setup, |card, stage| {
-                    card.child(super::launch_workspace::worktree_setup(stage, None, cx))
-                })
-                .when_some(error, |row, error| {
-                    row.child(control!(
-                        format!("error/{error}"),
-                        h_flex()
-                            .items_start()
-                            .gap_2()
-                            .child(Icon::new(IconName::TriangleAlert).small().flex_shrink_0())
-                            .child(div().min_w_0().text_sm().child(error.clone()))
-                    ))
-                });
-        control!(format!("Draft card/{}", launch.name), card)
+            });
+        let row = v_flex()
+            .id(id)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .when(edit.is_none(), |body| {
+                        body.child(control!(
+                            format!("Draft prompt/{}", launch.name),
+                            draft_prompt_block(
+                                if preview.is_empty() {
+                                    "Attachment-only draft".into()
+                                } else {
+                                    preview
+                                },
+                                cx
+                            )
+                            .line_clamp(3)
+                        ))
+                    })
+                    .when_some(edit, |body, edit| body.child(self.draft_editor(edit, cx)))
+                    .child(metadata)
+                    .child(actions)
+                    .when_some(setup, |row, stage| {
+                        row.child(super::launch_workspace::worktree_setup(stage, None, cx))
+                    })
+                    .when_some(error, |body, error| {
+                        body.child(control!(
+                            format!("error/{}", error.message()),
+                            h_flex()
+                                .items_start()
+                                .gap_2()
+                                .p_2()
+                                .rounded_md()
+                                .bg(cx.theme().danger.opacity(0.10))
+                                .child(
+                                    Icon::new(IconName::TriangleAlert)
+                                        .small()
+                                        .flex_shrink_0()
+                                        .text_color(
+                                            cx.theme()
+                                                .danger
+                                                .blend(cx.theme().foreground.opacity(0.60))
+                                        ),
+                                )
+                                .child(div().min_w_0().text_sm().child(error.message().to_owned()))
+                        ))
+                    }),
+            )
+            .when(expanded, |row| {
+                row.child(control!(
+                    format!("Draft details panel/{}", launch.name),
+                    self.draft_details(id, draft, &message, edit.is_some(), cx)
+                ))
+            });
+        control!(format!("Draft card/{}", launch.name), row)
     }
+}
+
+fn draft_prompt_block(text: String, cx: &App) -> Div {
+    div()
+        .w_full()
+        .rounded_md()
+        .bg(cx.theme().muted)
+        .px_3()
+        .py_2()
+        .text_sm()
+        .font_weight(FontWeight::NORMAL)
+        .line_height(rems(1.375))
+        .child(text)
+}
+
+fn draft_meta(icon: IconName, text: String, cx: &App) -> Div {
+    h_flex()
+        .min_w_0()
+        .max_w_full()
+        .gap_1p5()
+        .child(
+            Icon::new(icon)
+                .with_size(px(13.))
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(hint(text, cx).min_w_0().truncate())
 }
 
 fn draft_option(name: &'static str, value: String, cx: &App) -> Div {
     h_flex()
         .items_start()
         .gap_2()
-        .child(label(name).w(px(76.)).flex_shrink_0())
+        .child(
+            label(name)
+                .w(rems(5.75))
+                .flex_shrink_0()
+                .whitespace_nowrap(),
+        )
         .child(hint(value, cx).min_w_0())
 }
