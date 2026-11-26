@@ -146,6 +146,17 @@ impl DocumentTabs {
         self.tabs.iter().position(|tab| tab.id == id)
     }
 
+    fn remove_unused_editor(&mut self, tab: &DocumentTab) {
+        if let Some(path) = tab.document.path()
+            && !self
+                .tabs
+                .iter()
+                .any(|other| other.document.path() == Some(path))
+        {
+            self.editors.remove(path);
+        }
+    }
+
     fn select(&mut self, index: usize) {
         self.active = Some(index);
         self.reveal.set(Some(index));
@@ -157,6 +168,7 @@ const NO_DIFF: &str = "This file has no changes in this comparison.";
 pub(super) struct DocumentTab {
     id: usize,
     document: Document,
+    preview: bool,
     focus: FocusHandle,
     scroll: ScrollHandle,
     pending_heading: RefCell<Option<String>>,
@@ -373,19 +385,31 @@ impl Desktop {
         cx.notify();
     }
 
-    pub(super) fn open_document(
+    pub(super) fn open_sidebar_document(
         &mut self,
         document: Document,
+        keep_open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_document_at_heading(document, None, window, cx);
+        self.open_document(document, None, !keep_open, window, cx);
     }
 
     pub(super) fn open_document_at_heading(
         &mut self,
         document: Document,
         heading: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_document(document, heading, false, window, cx);
+    }
+
+    fn open_document(
+        &mut self,
+        document: Document,
+        heading: Option<String>,
+        preview: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -408,10 +432,10 @@ impl Desktop {
             .iter()
             .position(|tab| tab.document.matches(&document))
             .unwrap_or_else(|| {
-                let index = tabs.tabs.len();
-                tabs.tabs.push(DocumentTab {
+                let tab = DocumentTab {
                     id: tabs.next_id,
                     document: document.clone(),
+                    preview,
                     focus: cx.focus_handle().tab_stop(true),
                     scroll: ScrollHandle::new(),
                     diff_scroll: UniformListScrollHandle::new(),
@@ -422,13 +446,22 @@ impl Desktop {
                     revert_error: None,
                     load: None,
                     trace: None,
-                });
+                };
                 tabs.next_id += 1;
-                index
+                if preview && let Some(index) = tabs.tabs.iter().position(|tab| tab.preview) {
+                    let replaced = std::mem::replace(&mut tabs.tabs[index], tab);
+                    tabs.remove_unused_editor(&replaced);
+                    index
+                } else {
+                    let index = tabs.tabs.len();
+                    tabs.tabs.push(tab);
+                    index
+                }
             });
         tabs.select(index);
         let tab = &mut tabs.tabs[index];
         tab.document = document;
+        tab.preview &= preview;
         if heading.is_some() {
             tab.mode = DocumentMode::Preview;
         }
@@ -448,6 +481,22 @@ impl Desktop {
             self.load_raw_editor(&thread, path, true, window, cx);
         }
         cx.notify();
+    }
+
+    fn keep_document_open(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(thread) = &self.current {
+            let tabs = &mut self
+                .workspaces
+                .get_mut(&thread.id)
+                .expect("selected workspace")
+                .documents;
+            if let Some(index) = tabs.index_of(id) {
+                let tab = &mut tabs.tabs[index];
+                tab.preview = false;
+                tab.focus.focus(window);
+                cx.notify();
+            }
+        }
     }
 
     fn open_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -562,14 +611,7 @@ impl Desktop {
             return;
         };
         let tab = tabs.tabs.remove(index);
-        if let Some(path) = tab.document.path()
-            && !tabs
-                .tabs
-                .iter()
-                .any(|other| other.document.path() == Some(path))
-        {
-            tabs.editors.remove(path);
-        }
+        tabs.remove_unused_editor(&tab);
         match tabs.active {
             Some(active) if active == index && index > 0 => tabs.select(index - 1),
             Some(active) if active == index => return self.return_to_chat(window, cx),
@@ -735,6 +777,11 @@ impl DocumentTab {
         let label_style = TextStyle {
             font_family: theme.font_family.clone(),
             color: label_color,
+            font_style: if self.preview {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            },
             ..Default::default()
         };
         let font_size = crate::ui::control_text_size().to_pixels(window.rem_size());
@@ -791,6 +838,7 @@ impl DocumentTab {
                                 .whitespace_nowrap()
                                 .text_size(crate::ui::control_text_size())
                                 .text_color(label_color)
+                                .when(self.preview, |label| label.italic())
                                 .child(name)
                         )
                         .when(diff.is_some(), |tab| tab.child(
@@ -809,6 +857,9 @@ impl DocumentTab {
                                     .documents;
                                 if let Some(index) = tabs.index_of(id) {
                                     tabs.select(index);
+                                    if event.click_count() == 2 {
+                                        tabs.tabs[index].preview = false;
+                                    }
                                     if !event.is_keyboard() {
                                         view.focus_workspace(window, cx);
                                     }
@@ -820,6 +871,28 @@ impl DocumentTab {
                 )
                 .flex_none(),
             )
+            .when(self.preview, |tab| {
+                tab.child(
+                    control!(
+                        format!("Keep open {_key}"),
+                        Button::new("keep-open")
+                            .ghost()
+                            .size(px(24.))
+                            .p_0()
+                            .child(
+                                Icon::new(IconName::Check)
+                                    .path("icons/pin.svg")
+                                    .with_size(px(12.))
+                                    .text_color(muted)
+                            )
+                            .tooltip("Keep Open")
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.keep_document_open(id, window, cx)
+                            }))
+                    )
+                    .flex_none(),
+                )
+            })
             .child(
                 control!(
                     format!("Close {_key}"),

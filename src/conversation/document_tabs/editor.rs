@@ -88,6 +88,20 @@ impl Draft {
                 && let Some(draft) = view.document_draft_mut(&thread, &path)
             {
                 draft.dirty = input.read(cx).text() != draft.saved.as_str();
+                if draft.dirty {
+                    let tabs = &mut view
+                        .workspaces
+                        .get_mut(&thread)
+                        .expect("editor workspace")
+                        .documents;
+                    for tab in &mut tabs.tabs {
+                        if tab.mode == DocumentMode::Raw
+                            && tab.document.path() == Some(path.as_ref())
+                        {
+                            tab.preview = false;
+                        }
+                    }
+                }
                 cx.notify();
             }
         });

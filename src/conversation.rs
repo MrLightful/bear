@@ -36,7 +36,7 @@ pub(crate) use transcript::permission_card;
 
 use self::launch_workspace::{LaunchProgress, WorktreeStage};
 use crate::{
-    changes::{Changes, RevertFinished, ReviewRow},
+    changes::{Changes, OpenDiff, RevertFinished},
     git,
     paths::StoragePaths,
     questions::Questions,
@@ -603,8 +603,13 @@ impl Desktop {
                     return;
                 }
                 match action {
-                    FileAction::Open(path) => {
-                        view.open_document(Document::File(path.clone()), window, cx);
+                    FileAction::Open { path, keep_open } => {
+                        view.open_sidebar_document(
+                            Document::File(path.clone()),
+                            *keep_open,
+                            window,
+                            cx,
+                        );
                     }
                     FileAction::AttachFile(path) => {
                         view.return_to_chat(window, cx);
@@ -628,13 +633,18 @@ impl Desktop {
             cx.subscribe_in(
                 &changes,
                 window,
-                move |view, _, row: &ReviewRow, window, cx| {
+                move |view, _, action: &OpenDiff, window, cx| {
                     if view
                         .current
                         .as_ref()
                         .is_some_and(|current| current.id == thread)
                     {
-                        view.open_document(Document::Diff(row.clone()), window, cx);
+                        view.open_sidebar_document(
+                            Document::Diff(action.row.clone()),
+                            action.keep_open,
+                            window,
+                            cx,
+                        );
                     }
                 },
             )

@@ -41,7 +41,12 @@ pub struct Changes {
     mutation_task: Option<Task<()>>,
 }
 
-impl EventEmitter<ReviewRow> for Changes {}
+impl EventEmitter<OpenDiff> for Changes {}
+
+pub(crate) struct OpenDiff {
+    pub row: ReviewRow,
+    pub keep_open: bool,
+}
 impl EventEmitter<RevertFinished> for Changes {}
 
 pub(crate) struct RevertFinished {
@@ -720,7 +725,12 @@ impl Changes {
                                 .tooltip(move |window, cx| {
                                     Tooltip::new(full_path.clone()).build(window, cx)
                                 })
-                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(diff.clone())))
+                                .on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+                                    cx.emit(OpenDiff {
+                                        row: diff.clone(),
+                                        keep_open: event.click_count() == 2,
+                                    });
+                                }))
                                 .child(file_path_label(directory, filename, muted)),
                         )
                         .child(
