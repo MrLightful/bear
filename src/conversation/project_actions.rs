@@ -294,15 +294,7 @@ impl Desktop {
                         .context("Run pull request action")
                         .and_then(|result| result);
                     let _ = view.update(cx, |view, cx| {
-                        let result = result.map(|url| {
-                            if view.current.as_ref().is_some_and(|thread| thread.id == id) {
-                                #[cfg(all(feature = "qualification", target_os = "macos"))]
-                                if crate::qualification::record_open_url(&url, cx) {
-                                    return;
-                                }
-                                cx.open_url(&url);
-                            }
-                        });
+                        let result = result.map(|_| ());
                         if let Some(workspace) = view.workspaces.get(&id) {
                             workspace.refresh_after_checkout_update(view.workspace_tab, cx);
                         }
