@@ -131,18 +131,18 @@ def main():
         run_window(executable, starter_state, [
             {"resize": [640, 440]},
             {"hover": "thread/" + first}, {"click": "Settle/" + first},
-            {"in_lower_half": "section/Settled/1"}, {"absent": "thread/" + first},
+            {"absent": "thread/" + first},
             {"hover": "thread/Review my changes"}, {"click": "Settle/Review my changes"},
-            {"absent": "section/Ready/1"}, {"in_lower_half": "section/Settled/2"},
-            {"hover": "thread/Review my changes"}, {"click": "Unsettle/Review my changes"},
+            {"absent": "section/Ready/1"}, {"see": "Reopen conversation"},
+            {"click": "Reopen conversation"}, {"see": "Ready/Review my changes/Completed"},
         ], env)
         run_window(executable, starter_state, [
-            {"click": "section/Settled/1"}, {"click": "thread/" + first},
-            {"see": "Codex/reply " + first}, {"hover": "thread/" + first}, {"click": "Unsettle/" + first},
-            {"see": "Ready/" + first + "/Completed"}, {"hover": "thread/" + first}, {"click": "Settle/" + first},
-            {"see": "Settled/" + first + "/Settled"}, *send_message("Continue"),
-            {"see": "Codex/reply Continue"}, {"see": "Ready/" + first + "/Completed"},
-            {"absent": "section/Settled/1"},
+            {"click": "History"}, {"click": "Search conversations"}, {"type": "no match"},
+            {"absent": "thread/" + first}, {"key": "cmd-a"}, {"type": first},
+            {"click": "thread/" + first}, {"see": "Codex/reply " + first},
+            {"click": "Reopen conversation"}, {"see": "Ready/" + first + "/Completed"},
+            *send_message("Continue"), {"see": "Codex/reply Continue"},
+            {"see": "Ready/" + first + "/Completed"},
         ], env)
         attachment = checkout / "notes.txt"
         attachment.write_text("attachment fixture")

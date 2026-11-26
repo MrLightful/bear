@@ -86,12 +86,14 @@ Each refresh checks the checkout in a fresh Codex session. Servers that Huggler 
 
 ## Find a conversation by status
 
-The conversation sidebar is visible when Bear opens. Use the left sidebar button in the workspace header to hide or show conversations independently of Changes. The sidebar updates even while you work in another conversation. Needs attention and Ready sit at the top. Working and Settled sit together at the bottom. Click a section heading to collapse or expand it. Each section shows its count and lists the most recently active conversations first.
+The conversation sidebar is visible when Bear opens. Use the left sidebar button in the workspace header to hide or show conversations independently of Changes. The sidebar updates even while you work in another conversation. Needs attention and Ready sit at the top. Working sits at the bottom. Click a section heading to collapse or expand it. Each section shows its count and lists the most recently active conversations first.
 
 - **Needs attention** shows conversations that need an answer or approval, have a paused queue, or ended in an error. The reason appears below the conversation name.
 - **Ready** shows new conversations and conversations whose work completed or was stopped.
 - **Working** shows conversations with queued or active work, including running subagents. By default, only your open conversation appears in this group. A request for your input moves the conversation into **Needs attention** automatically.
-- **Settled** holds conversations you have marked as finished. Hover over an idle conversation and click its checkmark to settle it. Expand **Settled** to browse its history. Hover over a settled conversation and click its undo arrow to unsettle it. Sending a message also reopens the conversation. Settlement persists across restarts. By default, Bear also checks idle conversations every minute and settles them when their branch’s pull request has merged. The checkout must be clean and its current commit must match the merged PR’s head; reused branches with new work stay open. Turn off **Auto-settle merged PRs** in **Settings → General** to disable this behavior. Active or queued work prevents settlement.
+To settle a conversation, hover over its row and click the checkmark. Open **History** to search settled conversations by title. Choose **Reopen conversation** to resume in the existing checkout. If the managed worktree is gone, choose a base branch to create a fresh checkout. Use **Delete conversation** in History to permanently remove its messages and attachments. Bear also checks whether it can remove the worktree after its last conversation is deleted.
+
+By default, Bear checks idle conversations every minute and settles them when their clean checkout is at the exact commit that GitHub reports as the merged pull request’s head. Turn off **Auto-settle merged PRs** in **Settings → General** to disable this behavior. Active or queued work prevents settlement.
 
 ## Desktop data directory
 
@@ -115,7 +117,7 @@ The provider heading shows the setup state, detected executable version, and ava
 
 New conversations start with Codex selected. Use the composer’s provider and model picker to choose another provider before starting a conversation. Under **Appearance**, select **System**, **Light** or **Dark** to change the color theme immediately. Use the back arrow to retrace your steps to the conversation or launch form, including any draft. When you open settings from the model picker or terminal, the arrow takes you straight back to the workspace. **⌘N** opens the new conversation form.
 
-Open **Settings → Worktrees** to see local linked checkouts for your projects and conversations. Use **Open in Finder** to inspect a checkout, or **Remove** to release an unused, unchanged worktree created for a conversation. **Clean up now** removes unchanged worktrees left behind by older runs. Turn on **Automatic cleanup** to run that check immediately, at startup, and hourly.
+Open **Settings → Worktrees** to see local linked checkouts. **Clean up now** removes idle managed worktrees that are clean and either unchanged since creation or verified as merged at their current commit. Each row shows whether it is ready to remove or why Bear is keeping it. Cleanup keeps the conversation history and local branch. **Automatic cleanup** checks for abandoned, unchanged checkouts when enabled, at startup, and hourly.
 
 Select a provider and use **Models** to show or hide models in the conversation picker. Models appear in descending order by name until you reorder them with the arrows. Preferences apply to that provider instance across checkouts. The first option follows the provider’s default. It shows the model name when available and **Automatic** when the model is unknown. Model discovery uses the current checkout when available.
 

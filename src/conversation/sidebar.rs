@@ -170,12 +170,10 @@ impl Desktop {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll();
-        for section in [
-            Section::Attention,
-            Section::Ready,
-            Section::Working,
-            Section::Settled,
-        ] {
+        if self.history_open {
+            return list.child(self.history_sidebar(width, cx));
+        }
+        for section in [Section::Attention, Section::Ready, Section::Working] {
             // Keep the space above both lower groups even when Working is empty.
             if section == Section::Working {
                 list = list.child(div().flex_grow());
@@ -264,7 +262,7 @@ impl Desktop {
         list
     }
 
-    fn sidebar_row(
+    pub(super) fn sidebar_row(
         &self,
         thread: &ConversationSummary,
         section: Section,
@@ -298,13 +296,12 @@ impl Desktop {
                 )
             });
         let settled = thread.settled;
-        let action = if settled { "Unsettle" } else { "Settle" };
+        let action = "Settle";
         let group = "conversation-row";
-        let enabled = settled
-            || (!thread.needs_approval
-                && !thread.needs_answer
-                && !thread.active_children
-                && thread.status.is_none_or(RunStatus::terminal));
+        let enabled = !thread.needs_approval
+            && !thread.needs_answer
+            && !thread.active_children
+            && thread.status.is_none_or(RunStatus::terminal);
         let target = id.clone();
         let settlement = control!(
             format!("{action}/{}", thread.name),
@@ -315,11 +312,7 @@ impl Desktop {
                 .opacity(0.)
                 .group_hover(group, |style| style.opacity(1.))
                 .focus(|style| style.opacity(1.))
-                .icon(if settled {
-                    IconName::Undo2
-                } else {
-                    IconName::CircleCheck
-                })
+                .icon(IconName::CircleCheck)
                 .tooltip(action)
                 .disabled(!enabled)
                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -329,7 +322,7 @@ impl Desktop {
                         .dispatch(Command {
                             id: CommandId(Uuid::new_v4().to_string()),
                             thread_id: target.clone(),
-                            action: Action::SetSettled { settled: !settled },
+                            action: Action::SetSettled { settled: true },
                         })
                         .map(|_| ());
                     view.report(result, cx);
@@ -347,7 +340,7 @@ impl Desktop {
                     format!("{}/{}/{}", section.label(), thread.name, status),
                     content
                 ))
-                .child(settlement)
+                .when(!settled, |row| row.child(settlement))
                 .tooltip(format!("{} · {status}", thread.name))
                 .ghost()
                 .selected(selected)

@@ -170,24 +170,6 @@ pub(crate) fn linked_worktrees(root: &Path) -> Result<(PathBuf, Vec<LinkedWorktr
     Ok((main.path, worktrees.collect()))
 }
 
-/// Git status can omit tracked changes hidden by index flags.
-pub(crate) fn ensure_worktree_removal_safe(root: &Path) -> Result<()> {
-    let metadata = match std::fs::symlink_metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    ensure!(metadata.is_dir(), "The checkout is not a directory.");
-    let tracked = execute(git(root).args(["ls-files", "-v", "-z"]))?;
-    ensure!(
-        !tracked.split(|byte| *byte == 0).any(|record| record
-            .first()
-            .is_some_and(|flag| flag.is_ascii_lowercase() || *flag == b'S')),
-        "The checkout has tracked files hidden from Git status."
-    );
-    Ok(())
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Branch {
     pub reference: String,

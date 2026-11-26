@@ -138,7 +138,7 @@ The light palette uses a near-white workspace and a slightly darker sidebar. Dar
 
 ### Status
 
-Attention is amber, Ready is green, Working is blue, and Settled is slate. The conversation sidebar pairs each color with a distinct icon and a named group. An attention row adds a specific reason beneath its title.
+The conversation sidebar pairs each active status with a distinct icon and named group. Attention is amber, Ready is green, and Working is blue. Settled conversations appear in History. An attention row adds a specific reason beneath its title.
 
 Palette overrides live in [ui.rs](src/ui.rs), status colors in [sidebar.rs](src/conversation/sidebar.rs), and inherited primary, text, and focus roles in the GPUI Component theme pinned by [Cargo.toml](Cargo.toml).
 

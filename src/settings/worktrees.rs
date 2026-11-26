@@ -1,21 +1,28 @@
 use super::*;
 
-use crate::{git, open_in::OpenIn};
-use huggler::{
-    Project,
-    workspace::{OrphanedWorktreeOutcome, OrphanedWorktreeReport},
+use crate::{git, github::Checkout, open_in::OpenIn};
+use huggler::workspace::{
+    ManagedWorktree, OrphanedWorktreeEntry, OrphanedWorktreeOutcome, OrphanedWorktreeReport,
 };
 
 #[derive(Default)]
 pub(super) struct Inventory {
     managed_root: PathBuf,
     rows: Vec<Worktree>,
+    protected: HashSet<PathBuf>,
     pending: Option<Operation>,
     status: Option<String>,
     error: Option<String>,
 }
 
 impl Inventory {
+    pub(super) fn removing(&self) -> bool {
+        matches!(
+            self.pending,
+            Some(Operation::Cleanup | Operation::Remove | Operation::Orphans)
+        )
+    }
+
     pub(super) fn new(managed_root: PathBuf) -> Self {
         Self {
             managed_root,
@@ -28,7 +35,8 @@ struct Worktree {
     path: PathBuf,
     branch: Option<String>,
     conversations: usize,
-    allocation: Option<Project>,
+    managed: bool,
+    active: usize,
     cleanup: Option<(OrphanedWorktreeOutcome, String)>,
 }
 
@@ -37,9 +45,15 @@ enum Operation {
     Refresh,
     Cleanup,
     Remove,
+    Orphans,
 }
 
-fn inventory(runtime: &Huggler, prefs: &Preferences, managed_root: &Path) -> Result<Vec<Worktree>> {
+fn inventory(
+    runtime: &Huggler,
+    prefs: &Preferences,
+    managed_root: &Path,
+    assessed: Vec<(ManagedWorktree, OrphanedWorktreeEntry)>,
+) -> Result<Vec<Worktree>> {
     let mut checkouts = BTreeMap::new();
     for thread in runtime.threads()? {
         match runtime.thread_checkout(&thread.id) {
@@ -94,27 +108,23 @@ fn inventory(runtime: &Huggler, prefs: &Preferences, managed_root: &Path) -> Res
                 },
             );
         }
-        // Registering a linked checkout as a project would prevent orphan cleanup.
-        if let Ok(project) = runtime.open_project(&main)
-            && project.root == main
-        {
-            for allocation in runtime.allocated_workspaces(&project.id)? {
-                let path = allocation.root.clone();
-                let row = rows
-                    .entry(path.clone())
-                    .or_insert_with(|| Worktree::at(path));
-                row.allocation = Some(allocation);
-            }
-        }
     }
 
-    for entry in runtime.inspect_orphaned_worktrees()?.entries {
-        rows.entry(entry.path.clone())
-            .or_insert_with(|| Worktree::at(entry.path.clone()))
-            .cleanup = Some((entry.outcome, entry.reason));
+    for (worktree, entry) in assessed {
+        if worktree.released && !worktree.path.exists() && !worktree.threads.is_empty() {
+            continue;
+        }
+        let row = rows
+            .entry(entry.path.clone())
+            .or_insert_with(|| Worktree::at(entry.path));
+        row.managed = true;
+        row.active = worktree.active;
+        row.cleanup = Some((entry.outcome, entry.reason));
     }
     for (path, count) in checkouts {
-        if prefs.worktree_projects.contains_key(&path) || rows.contains_key(&path) {
+        if !runtime.worktree_released(&path)?
+            && (prefs.worktree_projects.contains_key(&path) || rows.contains_key(&path))
+        {
             rows.entry(path.clone())
                 .or_insert_with(|| Worktree::at(path))
                 .conversations = count;
@@ -129,40 +139,147 @@ impl Worktree {
             path,
             branch: None,
             conversations: 0,
-            allocation: None,
+            managed: false,
+            active: 0,
             cleanup: None,
         }
     }
 
     fn status(&self) -> String {
-        match self.conversations {
-            1 => "Used by 1 conversation".into(),
-            count if count > 1 => format!("Used by {count} conversations"),
-            _ => match &self.cleanup {
-                Some((OrphanedWorktreeOutcome::Removable, _)) => "Ready for cleanup".into(),
-                Some((_, reason)) => reason.clone(),
-                None if self.allocation.is_some() => "Unused managed worktree".into(),
-                None => "Git worktree".into(),
-            },
+        match &self.cleanup {
+            Some((OrphanedWorktreeOutcome::Removable, _)) => "Ready to remove".into(),
+            Some((_, reason)) => reason.clone(),
+            None if self.conversations == 1 => "Used by 1 conversation".into(),
+            None if self.conversations > 1 => {
+                format!("Used by {} conversations", self.conversations)
+            }
+            None => "Git worktree · managed outside Bear".into(),
         }
     }
 }
 
-fn remove_allocation(runtime: &Huggler, project: &Project) -> Result<()> {
-    git::ensure_worktree_removal_safe(&project.root)?;
-    runtime.release_workspace(&project.id)?;
+fn kept(path: &Path, reason: &str) -> OrphanedWorktreeEntry {
+    OrphanedWorktreeEntry {
+        path: path.to_owned(),
+        outcome: OrphanedWorktreeOutcome::Kept,
+        reason: reason.into(),
+        bytes: None,
+    }
+}
+
+struct Assessment {
+    worktree: ManagedWorktree,
+    entry: OrphanedWorktreeEntry,
+    merged_head: Option<String>,
+}
+
+async fn assess(
+    runtime: Arc<Huggler>,
+    prefs: &Preferences,
+    protected: &HashSet<PathBuf>,
+    only_unreferenced: Option<&Path>,
+) -> Result<Vec<Assessment>> {
+    let worktrees = runtime.managed_worktrees()?;
+    let mut results = Vec::new();
+    let mut checks = tokio::task::JoinSet::new();
+    let github_slots = Arc::new(tokio::sync::Semaphore::new(4));
+    for worktree in worktrees {
+        let path = &worktree.path;
+        if only_unreferenced.is_some_and(|target| target != path || !worktree.threads.is_empty()) {
+            continue;
+        }
+        let entry = if protected.contains(path) {
+            kept(path, "In use by an open terminal or editor")
+        } else if prefs.projects.iter().any(|project| &project.root == path) {
+            kept(path, "Saved as a project")
+        } else {
+            runtime.inspect_managed_worktree(path, None)?
+        };
+        if entry.outcome == OrphanedWorktreeOutcome::NeedsMergeVerification {
+            let thread = worktree.threads.first().cloned();
+            let repository_root = if thread.is_none() {
+                let Ok(main) = git::main_worktree(path) else {
+                    results.push(Assessment {
+                        worktree,
+                        entry,
+                        merged_head: None,
+                    });
+                    continue;
+                };
+                Some(main)
+            } else {
+                None
+            };
+            let checkout = Checkout {
+                runtime: runtime.clone(),
+                thread,
+                root: path.clone(),
+                repository_root,
+            };
+            let github_slots = github_slots.clone();
+            checks.spawn(async move {
+                let _slot = github_slots.acquire().await.expect("semaphore stays open");
+                let merged_head = tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    checkout.current_merged_head(),
+                )
+                .await
+                .ok()
+                .flatten();
+                Assessment {
+                    worktree,
+                    entry,
+                    merged_head,
+                }
+            });
+        } else {
+            results.push(Assessment {
+                worktree,
+                entry,
+                merged_head: None,
+            });
+        }
+    }
+    while let Some(result) = checks.join_next().await {
+        let mut assessment = result?;
+        if let Some(head) = &assessment.merged_head {
+            assessment.entry =
+                runtime.inspect_managed_worktree(&assessment.worktree.path, Some(head))?;
+        }
+        results.push(assessment);
+    }
+    Ok(results)
+}
+
+pub(crate) async fn reclaim_deleted_checkout(
+    runtime: Arc<Huggler>,
+    prefs: &Preferences,
+    protected: &HashSet<PathBuf>,
+    path: &Path,
+) -> Result<()> {
+    if let Some(assessment) = assess(runtime.clone(), prefs, protected, Some(path))
+        .await?
+        .pop()
+        && assessment.entry.outcome == OrphanedWorktreeOutcome::Removable
+    {
+        runtime.reclaim_unreferenced_worktree(path, assessment.merged_head.as_deref())?;
+    }
     Ok(())
 }
 
 impl Settings {
+    pub(crate) fn protect_open_worktrees(&mut self, paths: HashSet<PathBuf>) {
+        self.worktrees.protected = paths;
+    }
+
     pub(super) fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
-        self.run_worktree_operation(Operation::Refresh, |_| Ok(None), cx);
+        self.run_worktree_operation(Operation::Refresh, None, cx);
     }
 
     fn run_worktree_operation(
         &mut self,
         operation: Operation,
-        action: impl FnOnce(&Huggler) -> Result<Option<String>> + Send + 'static,
+        target: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
         if self.worktrees.pending.is_some() {
@@ -173,10 +290,81 @@ impl Settings {
         self.worktrees.error = None;
         let runtime = self.runtime.clone();
         let prefs = self.prefs.clone();
+        let executor = self.executor.clone();
         let managed_root = self.worktrees.managed_root.clone();
+        let protected = self.worktrees.protected.clone();
         let job = cx.background_spawn(async move {
-            let status = action(&runtime);
-            (status, inventory(&runtime, &prefs, &managed_root))
+            let automatic_result = matches!(operation, Operation::Orphans).then(|| {
+                let mut exclusions = prefs.saved_project_roots();
+                exclusions.extend(protected.iter().cloned());
+                runtime.cleanup_orphaned_worktrees_excluding(&exclusions)
+            });
+            let assessed = executor.block_on(assess(runtime.clone(), &prefs, &protected, None));
+            let assessed = match assessed {
+                Ok(assessed) => assessed,
+                Err(error) => return (Err(error), Ok(Vec::new())),
+            };
+            let mut status = match automatic_result {
+                Some(result) => result
+                    .map(|report| Some(cleanup_summary(&report)))
+                    .map_err(Into::into),
+                None => Ok(None),
+            };
+            let mut report = OrphanedWorktreeReport::default();
+            let mut remaining = Vec::new();
+            for Assessment {
+                worktree,
+                entry,
+                merged_head,
+            } in assessed
+            {
+                let selected = target.as_ref().is_some_and(|path| *path == worktree.path);
+                let idle = worktree.active == 0
+                    && !worktree.busy
+                    && (!worktree.released || worktree.threads.is_empty());
+                if selected || (matches!(operation, Operation::Cleanup) && idle) {
+                    let entry = if entry.outcome == OrphanedWorktreeOutcome::Removable {
+                        match runtime
+                            .reclaim_managed_worktree(&worktree.path, merged_head.as_deref())
+                        {
+                            Ok(entry) => entry,
+                            Err(error) => OrphanedWorktreeEntry {
+                                outcome: OrphanedWorktreeOutcome::Failed,
+                                reason: error.to_string(),
+                                ..entry
+                            },
+                        }
+                    } else {
+                        entry
+                    };
+                    report.entries.push(entry.clone());
+                    if selected {
+                        status = if entry.outcome == OrphanedWorktreeOutcome::Removed {
+                            Ok(Some("Worktree removed.".into()))
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "Could not remove {}. {}",
+                                worktree.path.display(),
+                                entry.reason
+                            ))
+                        };
+                    }
+                    if entry.outcome != OrphanedWorktreeOutcome::Removed {
+                        remaining.push((worktree, entry));
+                    }
+                } else {
+                    remaining.push((worktree, entry));
+                }
+            }
+            if matches!(operation, Operation::Cleanup) {
+                status = Ok(Some(cleanup_summary(&report)));
+            } else if matches!(operation, Operation::Remove) && report.entries.is_empty() {
+                status = Err(anyhow::anyhow!("This worktree is no longer available."));
+            }
+            (
+                status,
+                inventory(&runtime, &prefs, &managed_root, remaining),
+            )
         });
         cx.spawn(async move |view, cx| {
             let (status, rows) = job.await;
@@ -207,7 +395,7 @@ impl Settings {
         cx.notify();
     }
 
-    fn remove_worktree(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
+    fn remove_worktree(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(all(feature = "qualification", target_os = "macos"))]
         let scripted = crate::qualification::take_prompt_answer(cx);
         #[cfg(not(all(feature = "qualification", target_os = "macos")))]
@@ -217,8 +405,8 @@ impl Settings {
                 PromptLevel::Warning,
                 "Remove this worktree?",
                 Some(&format!(
-                    "Bear will remove {} if it is unused and unchanged.",
-                    project.root.display()
+                    "Bear will check {} again before removing it. Saved conversations will remain in history.",
+                    path.display()
                 )),
                 &["Cancel", "Remove"],
                 cx,
@@ -231,16 +419,7 @@ impl Settings {
             };
             if answer == Some(1) {
                 let _ = view.update(cx, |view, cx| {
-                    view.run_worktree_operation(
-                        Operation::Remove,
-                        move |runtime| {
-                            remove_allocation(runtime, &project).with_context(|| {
-                                format!("Could not remove {}.", project.root.display())
-                            })?;
-                            Ok(Some("Worktree removed.".into()))
-                        },
-                        cx,
-                    );
+                    view.run_worktree_operation(Operation::Remove, Some(path), cx);
                 });
             }
         })
@@ -317,6 +496,7 @@ impl Settings {
 
     fn worktree_row(&self, index: usize, row: &Worktree, cx: &Context<Self>) -> impl IntoElement {
         let path = row.path.clone();
+        let remove_path = path.clone();
         let location = path.display().to_string();
         let title = row.branch.clone().unwrap_or_else(|| {
             path.file_name()
@@ -352,25 +532,22 @@ impl Settings {
                                 cx.notify();
                             }))
                     ))
-                    .when_some(
-                        row.allocation.clone().filter(|_| row.conversations == 0),
-                        |actions, project| {
-                            actions.child(control!(
-                                format!("Remove worktree/{location}"),
-                                Button::new("remove-worktree")
-                                    .small()
-                                    .ghost()
-                                    .label("Remove")
-                                    .disabled(self.worktrees.pending.is_some())
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.remove_worktree(project.clone(), window, cx);
-                                    }))
-                            ))
-                        },
-                    ),
+                    .when(row.managed && row.active == 0, |actions| {
+                        actions.child(control!(
+                            format!("Remove worktree/{location}"),
+                            Button::new("remove-worktree")
+                                .small()
+                                .ghost()
+                                .label("Remove")
+                                .disabled(self.worktrees.pending.is_some())
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.remove_worktree(remove_path.clone(), window, cx);
+                                }))
+                        ))
+                    }),
             )
             .child(hint(location, cx).text_ellipsis())
-            .child(hint(row.status(), cx))
+            .child(control!(row.status(), hint(row.status(), cx)))
     }
 
     fn worktree_cleanup(&self, cx: &Context<Self>) -> Div {
@@ -395,14 +572,14 @@ impl Settings {
                                         cx,
                                     ) && enabled
                                     {
-                                        view.cleanup_worktrees(cx);
+                                        view.run_worktree_operation(Operation::Orphans, None, cx);
                                     }
                                 }))
                         )
                     })),
             )
             .child(hint(
-                "When on, Bear checks at startup and hourly. Cleanup removes eligible worktrees with no local changes or new commits.",
+                "When on, Bear checks at startup and hourly. The background check removes abandoned, unchanged checkouts. Use Clean up now to also reclaim worktrees from settled conversations.",
                 cx,
             ))
     }
@@ -425,22 +602,13 @@ impl Settings {
     }
 
     fn cleanup_worktrees(&mut self, cx: &mut Context<Self>) {
-        self.run_worktree_operation(
-            Operation::Cleanup,
-            |runtime| {
-                let report = runtime
-                    .cleanup_orphaned_worktrees()
-                    .context("Could not clean up worktrees")?;
-                Ok(Some(cleanup_summary(&report)))
-            },
-            cx,
-        );
+        self.run_worktree_operation(Operation::Cleanup, None, cx);
     }
 }
 
 fn cleanup_summary(report: &OrphanedWorktreeReport) -> String {
     if report.entries.is_empty() {
-        return "No unused worktrees found.".into();
+        return "No idle managed worktrees to clean up.".into();
     }
     let count = |outcome| {
         report
@@ -453,7 +621,8 @@ fn cleanup_summary(report: &OrphanedWorktreeReport) -> String {
         "Removed {}",
         count(OrphanedWorktreeOutcome::Removed)
     )];
-    let kept = count(OrphanedWorktreeOutcome::Kept);
+    let kept = count(OrphanedWorktreeOutcome::Kept)
+        + count(OrphanedWorktreeOutcome::NeedsMergeVerification);
     if kept > 0 {
         parts.push(format!("kept {kept} for review"));
     }

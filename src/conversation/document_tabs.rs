@@ -129,6 +129,13 @@ pub(super) struct DocumentTabs {
 }
 
 impl DocumentTabs {
+    pub(super) fn has_unsaved_changes(&self) -> bool {
+        self.editors
+            .values()
+            .filter_map(Editor::draft)
+            .any(|draft| draft.dirty || draft.is_saving())
+    }
+
     pub(super) fn show_chat(&mut self) {
         self.active = None;
     }

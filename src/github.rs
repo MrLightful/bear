@@ -107,6 +107,7 @@ pub(super) struct Checkout {
     pub runtime: Arc<Huggler>,
     pub thread: Option<ThreadId>,
     pub root: PathBuf,
+    pub repository_root: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -215,6 +216,7 @@ pub async fn publish_from_stdin(target_json: &str) -> Result<String> {
         runtime,
         thread: None,
         root: target.root.clone(),
+        repository_root: None,
     };
     let result = checkout.create_pull_request(&target, &text).await;
     checkout.runtime.close().await?;
@@ -275,13 +277,21 @@ impl PullRequestTarget {
 impl Checkout {
     /// Recheck the local checkout after the network lookup before applying policy.
     pub async fn has_current_merged_pr(&self) -> bool {
+        self.current_merged_head().await.is_some()
+    }
+
+    pub async fn current_merged_head(&self) -> Option<String> {
         let Status::Found { branch, pr, .. } = self.status().await else {
-            return false;
+            return None;
         };
-        pr.state() == PullRequestState::Merged
+        if pr.state() == PullRequestState::Merged
             && pr.head_commit() == branch.local_oid
             && git::has_uncommitted_changes(&self.root).is_ok_and(|dirty| !dirty)
             && git::github_branch(&self.root).is_ok_and(|current| current.same_target(&branch))
+        {
+            return Some(branch.local_oid);
+        }
+        None
     }
 
     pub async fn status(&self) -> Status {
@@ -555,7 +565,8 @@ impl Checkout {
             self.runtime
                 .bind_thread_repository(thread, Driver::GitHub, &origin, &repository)?
         } else {
-            let project = self.runtime.open_project(&self.root)?;
+            let root = self.repository_root.as_deref().unwrap_or(&self.root);
+            let project = self.runtime.open_project(root)?;
             self.runtime
                 .bind_repository(&project.id, Driver::GitHub, &origin, &repository)?
         };

@@ -4,6 +4,7 @@ mod backlog;
 mod document_tabs;
 mod file_tree;
 mod launch_workspace;
+mod lifecycle;
 pub(crate) mod markdown_view;
 mod mcp_status;
 mod models;
@@ -163,6 +164,12 @@ pub struct Desktop {
     threads: Vec<ConversationSummary>,
     agent_activity: agent_activity::AgentActivity,
     expanded_sections: HashMap<sidebar::Section, bool>,
+    history_open: bool,
+    history_search: Entity<InputState>,
+    released_source: Option<huggler::Result<PathBuf>>,
+    restoring_worktree: bool,
+    restore_branch_picker: Option<Entity<ListState<launch_workspace::BranchPicker>>>,
+    restore_branch_load: Option<Task<()>>,
     current: Option<ConversationDetail>,
     pull_request: Option<crate::github::Status>,
     pull_request_watch: Option<Task<()>>,
@@ -315,6 +322,13 @@ impl Desktop {
             threads: Vec::new(),
             agent_activity: agent_activity::AgentActivity::default(),
             expanded_sections: HashMap::new(),
+            history_open: false,
+            history_search: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Search conversations")),
+            released_source: None,
+            restoring_worktree: false,
+            restore_branch_picker: None,
+            restore_branch_load: None,
             current: None,
             pull_request: None,
             pull_request_watch: None,
@@ -398,6 +412,12 @@ impl Desktop {
                     delay.await;
                     let _ = view.update(cx, |view, cx| view.preload_models(cx));
                 }));
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&view.history_search, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
                 cx.notify();
             }
         })
@@ -511,6 +531,7 @@ impl Desktop {
             .find(|t| Some(&t.id.0) == saved.as_ref())
             .or_else(|| self.threads.first());
         if let Some(thread) = selected {
+            self.history_open = thread.settled;
             self.select(thread.id.clone(), window, cx)?;
         } else {
             self.starter.focus_handle(cx).focus(window);
@@ -527,7 +548,9 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_settings = false;
+        if !self.leave_settings(cx) {
+            return;
+        }
         self.backlog.open = false;
         self.error = None;
         let key = (machine.environment.clone(), machine.project.clone());
@@ -568,6 +591,8 @@ impl Desktop {
         self.project_picker = None;
         self.checkout_browse = None;
         self.ensure_workspace(&id, window, cx)?;
+        self.close_restore_picker(cx);
+        self.update_checkout_availability(&id);
         self.backlog.open = false;
         #[cfg(unix)]
         {
@@ -582,7 +607,6 @@ impl Desktop {
             .show_chat();
         if self.current.as_ref().is_some_and(|thread| thread.id == id) {
             self.focus_workspace(window, cx);
-            self.checkout_unavailable = !self.workspaces[&id].root.is_dir();
             self.watch_pull_request(cx);
             return Ok(());
         }
@@ -592,16 +616,18 @@ impl Desktop {
         self.command_log = None;
         self.expanded_activity.clear();
         self.full_messages.clear();
-        self.checkout_unavailable = !self.workspaces[&id].root.is_dir();
         self.prompt = self.workspaces[&id].draft.clone();
         self.suggestions = Default::default();
         self.model_picker = None;
         self.launch_workspace.close_picker();
+        let settled = snapshot.settled;
         self.current = Some(snapshot);
         self.refresh_traces(None);
         self.pull_request = None;
         self.watch_pull_request(cx);
-        self.preload_models(cx);
+        if !settled {
+            self.preload_models(cx);
+        }
         self.before = None;
         self.focus_workspace(window, cx);
         self.history_scroll.scroll_to_bottom();
@@ -778,7 +804,10 @@ impl Desktop {
                     != old.history.messages.last().map(|m| &m.message.id)
                     || thread.streaming_text != old.streaming_text
                     || thread.activity != old.activity
-                    || thread.latest_run.as_ref().and_then(|run| run.error.as_ref())
+                    || thread
+                        .latest_run
+                        .as_ref()
+                        .and_then(|run| run.error.as_ref())
                         != old.latest_run.as_ref().and_then(|run| run.error.as_ref()))
             {
                 self.history_scroll.scroll_to_bottom();
@@ -833,8 +862,13 @@ impl Desktop {
     }
 
     fn leave_settings(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.show_settings && !self.settings.update(cx, |settings, cx| settings.leave(cx)) {
-            return false;
+        if self.show_settings {
+            if !self.settings.update(cx, |settings, cx| settings.leave(cx)) {
+                return false;
+            }
+            if let Some(id) = self.current.as_ref().map(|thread| thread.id.clone()) {
+                self.update_checkout_availability(&id);
+            }
         }
         self.show_settings = false;
         true
@@ -852,9 +886,13 @@ impl Desktop {
         self.project_picker = None;
         self.checkout_browse = None;
         self.launch_workspace.close_picker();
+        self.close_restore_picker(cx);
         self.show_settings = true;
-        self.settings
-            .update(cx, |settings, cx| settings.opened(target, window, cx));
+        let protected = self.open_worktrees(cx);
+        self.settings.update(cx, |settings, cx| {
+            settings.protect_open_worktrees(protected);
+            settings.opened(target, window, cx);
+        });
         self.settings.read(cx).focus.focus(window);
         cx.notify();
     }
@@ -879,6 +917,7 @@ impl Desktop {
                     Some(_) => documents
                         .active_editor_focus(cx)
                         .unwrap_or_else(|| self.focus.clone()),
+                    None if thread.settled => self.focus.clone(),
                     None => self.prompt.focus_handle(cx),
                 };
                 focus.focus(window);
@@ -897,6 +936,10 @@ impl Desktop {
             return;
         }
         let input = match &self.current {
+            Some(thread) if thread.settled => {
+                self.return_to_chat(window, cx);
+                return;
+            }
             Some(_) => {
                 self.return_to_chat(window, cx);
                 if window.viewport_size().width < NARROW_VIEWPORT_WIDTH
@@ -922,6 +965,8 @@ impl Desktop {
             return;
         }
         self.backlog.open = false;
+        self.history_open = false;
+        self.close_restore_picker(cx);
         self.error = None;
         self.suggestions = Default::default();
         self.model_picker = None;
@@ -1224,7 +1269,9 @@ impl Desktop {
                         if let Some(Err(error)) = cleanup {
                             v.record_error(
                                 target,
-                                format!("Message sent. Could not remove its Backlog draft. {error}"),
+                                format!(
+                                    "Message sent. Could not remove its Backlog draft. {error}"
+                                ),
                                 None,
                                 cx,
                             );
@@ -1274,7 +1321,7 @@ impl Desktop {
         };
         let text = self.prompt.read(cx).value().to_string();
         let attachments = &self.workspaces[&thread.id].attachments;
-        if attachments.loading {
+        if thread.settled || attachments.loading {
             return Ok(());
         }
         if text.trim().is_empty() && attachments.is_empty(&text) {
@@ -1432,42 +1479,52 @@ impl Desktop {
             .gap_2()
             .child(self.navigation_toggle(navigation_open, cx))
             .child(crumb)
-            .when(self.current.is_some(), |header| {
-                let action = match (self.workspace_tab, right_open) {
-                    (WorkspaceTab::AllFiles, true) => "Hide all files",
-                    (WorkspaceTab::AllFiles, false) => "Show all files",
-                    (WorkspaceTab::Changes, true) => "Hide changes",
-                    (WorkspaceTab::Changes, false) => "Show changes",
-                    (WorkspaceTab::Traces, true) => "Hide traces",
-                    (WorkspaceTab::Traces, false) => "Show traces",
-                };
-                header.child(self.project_actions(cx)).child(control!(
-                    action,
-                    Button::new("toggle-right-sidebar")
-                        .ghost()
-                        .small()
-                        .icon(IconName::PanelRight)
-                        .selected(right_open)
-                        .tooltip(action)
-                        .on_click(cx.listener(move |view, _, _window, cx| {
-                            #[cfg(target_os = "macos")]
-                            if right_open
-                                && let Some(thread) = &view.current
-                                && view.workspaces[&thread.id].terminal.is_focused(_window, cx)
-                            {
-                                view.focus_workspace(_window, cx);
-                            }
-                            view.right_sidebar.toggle(right_open);
-                            if !right_open && let Some(thread) = &view.current {
-                                view.workspace_tab.refresh(&view.workspaces[&thread.id], cx);
-                                if view.workspace_tab == WorkspaceTab::Traces {
-                                    view.refresh_trace_list();
-                                }
-                            }
-                            cx.notify();
-                        }))
-                ))
-            })
+            .when(
+                self.current.is_some() && self.released_source.is_none(),
+                |header| {
+                    let action = match (self.workspace_tab, right_open) {
+                        (WorkspaceTab::AllFiles, true) => "Hide all files",
+                        (WorkspaceTab::AllFiles, false) => "Show all files",
+                        (WorkspaceTab::Changes, true) => "Hide changes",
+                        (WorkspaceTab::Changes, false) => "Show changes",
+                        (WorkspaceTab::Traces, true) => "Hide traces",
+                        (WorkspaceTab::Traces, false) => "Show traces",
+                    };
+                    header
+                        .when(!self.checkout_unavailable, |header| {
+                            header.child(self.project_actions(cx))
+                        })
+                        .child(control!(
+                            action,
+                            Button::new("toggle-right-sidebar")
+                                .ghost()
+                                .small()
+                                .icon(IconName::PanelRight)
+                                .selected(right_open)
+                                .tooltip(action)
+                                .on_click(cx.listener(move |view, _, _window, cx| {
+                                    #[cfg(target_os = "macos")]
+                                    if right_open
+                                        && let Some(thread) = &view.current
+                                        && view.workspaces[&thread.id]
+                                            .terminal
+                                            .is_focused(_window, cx)
+                                    {
+                                        view.focus_workspace(_window, cx);
+                                    }
+                                    view.right_sidebar.toggle(right_open);
+                                    if !right_open && let Some(thread) = &view.current {
+                                        view.workspace_tab
+                                            .refresh(&view.workspaces[&thread.id], cx);
+                                        if view.workspace_tab == WorkspaceTab::Traces {
+                                            view.refresh_trace_list();
+                                        }
+                                    }
+                                    cx.notify();
+                                }))
+                        ))
+                },
+            )
     }
 
     fn workspace_tabs(&self, width: f32, cx: &Context<Self>) -> Div {
@@ -1906,83 +1963,97 @@ impl Desktop {
             .w(width)
             .mx_auto()
             .relative()
-            .when(show_scroll_to_end, |column| column.child(Self::scroll_to_end_button(cx)))
-            .when(fresh, |column| {
-                column.child(
-                    heading("What should we build?").text_xl().mx_4().mb_3(),
-                )
+            .when(show_scroll_to_end, |column| {
+                column.child(Self::scroll_to_end_button(cx))
             })
-        .child(
-            Self::composer_surface(cx)
-                .on_drop(cx.listener(Self::drop_attachments))
-                .mx_4().mb_2()
-                .when_some(
-                    last_run.and_then(|run| run.prompt_suggestion.clone()),
-                    |row, hint| {
-                        row.child(control!(
-                            "Suggested reply",
-                            Button::new("suggestion")
-                                .label(hint.clone())
-                                .on_click(cx.listener(move |view, _, window, cx| {
-                                    if view.prompt.read(cx).value().is_empty() {
-                                        view.prompt.update(cx, |input, cx| {
-                                            input.set_value(hint.clone(), window, cx)
-                                        });
-                                        view.prompt.focus_handle(cx).focus(window);
-                                    }
-                                }))
-                        ))
-                    },
-                )
-                .child(message_input)
-                .children(self.attachment_list(attachments, cx))
-                .when(thread.queued_count > 0, |composer| {
-                    let count = thread.queued_count;
-                    let noun = if count == 1 { "message" } else { "messages" };
-                    let summary = if thread.queue_held {
-                        format!("{count} queued {noun} · paused")
-                    } else {
-                        format!("{count} queued {noun}")
-                    };
-                    composer.child(
-                        h_flex()
-                            .gap_2()
-                            .child(control!(summary.clone(), div().text_sm().child(summary)))
-                            .when(thread.queue_held, |row| {
-                                let thread = thread.id.clone();
+            .when(fresh, |column| {
+                column.child(heading("What should we build?").text_xl().mx_4().mb_3())
+            })
+            .when(thread.settled, |column| {
+                column.child(self.settled_footer(thread, cx))
+            })
+            .when(!thread.settled, |column| {
+                column.child(
+                    Self::composer_surface(cx)
+                        .on_drop(cx.listener(Self::drop_attachments))
+                        .mx_4()
+                        .mb_2()
+                        .when_some(
+                            last_run.and_then(|run| run.prompt_suggestion.clone()),
+                            |row, hint| {
                                 row.child(control!(
-                                    "Resume queue",
-                                    Button::new("resume-queue").label("Resume queue").on_click(
-                                        cx.listener(move |v, _, _, cx| {
-                                            let result = v
-                                                .runtime
-                                                .resume_queue(
-                                                    CommandId(Uuid::new_v4().to_string()),
-                                                    thread.clone(),
-                                                )
-                                                .map(|_| ());
-                                            v.report(result, cx);
+                                    "Suggested reply",
+                                    Button::new("suggestion").label(hint.clone()).on_click(
+                                        cx.listener(move |view, _, window, cx| {
+                                            if view.prompt.read(cx).value().is_empty() {
+                                                view.prompt.update(cx, |input, cx| {
+                                                    input.set_value(hint.clone(), window, cx)
+                                                });
+                                                view.prompt.focus_handle(cx).focus(window);
+                                            }
                                         })
                                     )
                                 ))
-                            }),
-                    )
-                })
-                .child(
-                    h_flex()
-                        .flex_wrap().gap_2()
-                        .child(self.model_control(cx))
-                        .child(div().flex_1().min_w_0())
-                        .child(self.mcp_status_control(window, cx))
-                        .child(h_flex().gap_2().flex_shrink_0()
-                            .child(self.attach_button(attachments, cx))
-                            .children(stop)
-                            .when(!can_stop || !empty_draft, |row| {
-                                row.child(control!(_action_label, send.primary()))
-                            })),
-                ),
-        )
-        .pb_2();
+                            },
+                        )
+                        .child(message_input)
+                        .children(self.attachment_list(attachments, cx))
+                        .when(thread.queued_count > 0, |composer| {
+                            let count = thread.queued_count;
+                            let noun = if count == 1 { "message" } else { "messages" };
+                            let summary = if thread.queue_held {
+                                format!("{count} queued {noun} · paused")
+                            } else {
+                                format!("{count} queued {noun}")
+                            };
+                            composer.child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(control!(
+                                        summary.clone(),
+                                        div().text_sm().child(summary)
+                                    ))
+                                    .when(thread.queue_held, |row| {
+                                        let thread = thread.id.clone();
+                                        row.child(control!(
+                                            "Resume queue",
+                                            Button::new("resume-queue")
+                                                .label("Resume queue")
+                                                .on_click(cx.listener(move |v, _, _, cx| {
+                                                    let result = v
+                                                        .runtime
+                                                        .resume_queue(
+                                                            CommandId(Uuid::new_v4().to_string()),
+                                                            thread.clone(),
+                                                        )
+                                                        .map(|_| ());
+                                                    v.report(result, cx);
+                                                }))
+                                        ))
+                                    }),
+                            )
+                        })
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(self.model_control(cx))
+                                .child(div().flex_1().min_w_0())
+                                .child(self.mcp_status_control(window, cx))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .flex_shrink_0()
+                                        .child(self.attach_button(attachments, cx))
+                                        .children(stop)
+                                        .when(!can_stop || !empty_draft, |row| {
+                                            row.child(control!(_action_label, send.primary()))
+                                        }),
+                                ),
+                        ),
+                )
+            })
+            .pb_2();
         page.child(column)
     }
 
@@ -2070,7 +2141,10 @@ impl Render for Desktop {
         let navigation_open = self.navigation.is_open(navigation_default);
         let left = self.navigation.fraction(navigation_default, window);
         let remote = self.remote_open();
-        let right = if self.current.is_some() && self.local_workspace_visible() {
+        let right = if self.current.is_some()
+            && self.released_source.is_none()
+            && self.local_workspace_visible()
+        {
             self.right_sidebar.fraction(!narrow, window)
         } else {
             0.
@@ -2178,6 +2252,7 @@ impl Render for Desktop {
                                                     )
                                                 }))
                                         ))
+                                        .child(self.history_navigation(cx))
                                         .child(control!(
                                             "Backlog",
                                             Button::new("backlog")

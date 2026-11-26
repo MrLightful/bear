@@ -129,7 +129,16 @@ impl Default for Preferences {
     }
 }
 
+pub(crate) use worktrees::reclaim_deleted_checkout;
+
 impl Preferences {
+    pub(crate) fn saved_project_roots(&self) -> Vec<PathBuf> {
+        self.projects
+            .iter()
+            .map(|project| project.root.clone())
+            .collect()
+    }
+
     pub(crate) fn configure_providers(
         &mut self,
         options: &mut HugglerOptions,
@@ -251,6 +260,7 @@ pub struct Settings {
     pub focus: FocusHandle,
     error: Option<String>,
     worktrees: worktrees::Inventory,
+    executor: tokio::runtime::Handle,
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -265,7 +275,7 @@ impl Settings {
         paths: &StoragePaths,
         runtime: Arc<Huggler>,
         load_error: Option<String>,
-        _executor: tokio::runtime::Handle,
+        executor: tokio::runtime::Handle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -291,6 +301,7 @@ impl Settings {
             prefs,
             state: paths.state_dir(),
             runtime,
+            executor: executor.clone(),
             input,
             providers,
             project_editor: None,
@@ -298,7 +309,7 @@ impl Settings {
             action_editor: None,
             adding_project: false,
             #[cfg(unix)]
-            machines: machines::Fields::new(_executor, window, cx),
+            machines: machines::Fields::new(executor, window, cx),
             model_catalog: None,
             catalog_subscription: None,
             preset_catalogs: BTreeMap::new(),
@@ -336,7 +347,7 @@ impl Settings {
     }
 
     pub(crate) fn leave(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.save_provider_edits(cx) {
+        if self.worktrees.removing() || !self.save_provider_edits(cx) {
             return false;
         }
         self.project_editor = None;
@@ -348,7 +359,7 @@ impl Settings {
     }
 
     fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page == page || !self.save_provider_edits(cx) {
+        if self.page == page || self.worktrees.removing() || !self.save_provider_edits(cx) {
             return;
         }
         self.page = page;
@@ -656,7 +667,7 @@ impl Settings {
                     (
                         Page::Worktrees,
                         IconName::Folder,
-                        "View checkouts and clean up unused worktrees",
+                        "Review local checkouts and reclaim worktrees",
                     ),
                 ],
             ))
