@@ -7,6 +7,7 @@ mod launch_workspace;
 pub(crate) mod markdown_view;
 mod mcp_status;
 mod models;
+pub(crate) use models::effort_label;
 mod project_actions;
 mod projects;
 mod sidebar;
