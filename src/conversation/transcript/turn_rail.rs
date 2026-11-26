@@ -96,6 +96,7 @@ struct RailPosition {
 pub(super) fn render(
     previews: Vec<TurnPreview>,
     scroll: &ScrollHandle,
+    first_turn_item: usize,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -116,7 +117,7 @@ pub(super) fn render(
                 let selected = if history_at_bottom(&history) {
                     last
                 } else {
-                    history.top_item().min(last)
+                    history.top_item().saturating_sub(first_turn_item).min(last)
                 };
                 let active = Some((selected, bounds.size.height));
                 if rail.active.replace(active) != active {
@@ -223,7 +224,7 @@ pub(super) fn render(
                                     .border_0()
                                     .child(marker)
                                     .on_click(move |_, window, _| {
-                                        jump.scroll_to_top_of_item(index);
+                                        jump.scroll_to_top_of_item(first_turn_item + index);
                                         window.refresh();
                                     }),
                             )

@@ -619,6 +619,11 @@ impl Desktop {
     fn backlog_row(&self, id: Uuid, draft: &SavedDraft, cx: &Context<Self>) -> Div {
         let launch = &draft.launch;
         let sending = self.backlog.sending == Some(id);
+        let setup = self
+            .launching
+            .as_ref()
+            .filter(|progress| sending && progress.thread.0 == id.to_string())
+            .and_then(|progress| progress.stage);
         let error = self.backlog.errors.get(&id);
         let action = if sending {
             "Sending…"
@@ -759,6 +764,9 @@ impl Desktop {
                         format!("Draft details panel/{}", launch.name),
                         self.draft_details(launch, cx)
                     ))
+                })
+                .when_some(setup, |card, stage| {
+                    card.child(super::launch_workspace::worktree_setup(stage, None, cx))
                 })
                 .when_some(error, |row, error| {
                     row.child(control!(

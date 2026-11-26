@@ -231,6 +231,47 @@ impl Desktop {
         cx.notify();
     }
 
+    pub(super) fn transcript_width(width: Pixels) -> Pixels {
+        // Keep the left rail clear of the centered text in narrow windows.
+        (width - px(24.)).clamp(px(0.), px(800.))
+    }
+
+    fn history_viewport() -> Stateful<Div> {
+        v_flex()
+            .id("history")
+            .size_full()
+            .items_center()
+            .pt_4()
+            .pb_4()
+            .gap_6()
+            .overflow_y_scroll()
+    }
+
+    pub(super) fn launch_history(&self, progress: &LaunchProgress, width: Pixels, cx: &App) -> Div {
+        let Some(stage) = progress.stage else {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .child(label("Opening conversation…"));
+        };
+        let width = Self::transcript_width(width);
+        v_flex().flex_1().min_h_0().child(
+            Self::history_viewport().child(
+                v_flex()
+                    .w(width)
+                    .px(GUTTER)
+                    .flex_shrink_0()
+                    .child(launch_workspace::worktree_setup(
+                        stage,
+                        Some(&progress.title),
+                        cx,
+                    )),
+            ),
+        )
+    }
+
     pub(super) fn transcript(
         &self,
         thread: &ConversationDetail,
@@ -242,15 +283,7 @@ impl Desktop {
             .runtime
             .output()
             .provider_label(thread.provider_instance.as_str());
-        let mut history = v_flex()
-            .id("history")
-            .track_scroll(&self.history_scroll)
-            .size_full()
-            .items_center()
-            .pt_4()
-            .pb_4()
-            .gap_6()
-            .overflow_y_scroll();
+        let mut history = Self::history_viewport().track_scroll(&self.history_scroll);
         let pager = h_flex()
             .w(width)
             .mx_auto()
@@ -285,6 +318,15 @@ impl Desktop {
         let content_width = (width - GUTTER * 2.).max(px(0.));
         let response_width = content_width.min(MAX_RESPONSE_WIDTH);
         let column = || v_flex().w(width).px(GUTTER).gap_3().flex_shrink_0();
+        // Setup precedes the first turn and belongs on the oldest history page.
+        let show_setup = thread.history.older.is_none() && self.has_worktree_history(&thread.id);
+        if show_setup {
+            history = history.child(column().child(launch_workspace::worktree_setup(
+                WorktreeStage::Ready,
+                None,
+                cx,
+            )));
+        }
         let mut previews = Vec::new();
         let mut shown = HashSet::new();
         let foreground = thread
@@ -376,6 +418,7 @@ impl Desktop {
                     viewport.child(turn_rail::render(
                         previews,
                         &self.history_scroll,
+                        usize::from(show_setup),
                         window,
                         cx,
                     ))
