@@ -5,7 +5,7 @@ mod general;
 #[cfg(unix)]
 mod machines;
 mod mcp;
-mod model_presets;
+mod model_favorites;
 mod models;
 mod project_actions;
 pub(crate) mod projects;
@@ -30,9 +30,10 @@ use gpui_component::{
     v_flex,
 };
 use huggler::{Huggler, HugglerOptions, Provider, ProviderInstanceId};
-pub(crate) use model_presets::{ModelPreset, STANDARD_SPEED};
+pub(crate) use model_favorites::{ModelFavorite, STANDARD_SPEED, is_fast_tier};
 pub(crate) use models::ModelPreferences;
 use providers::ProviderSettings;
+pub(crate) use providers::provider_logo;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -85,8 +86,10 @@ pub struct Preferences {
     provider_presets: HashSet<ProviderInstanceId>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     models: BTreeMap<String, ModelPreferences>,
-    #[serde(skip_serializing_if = "model_presets::all_empty")]
-    default_models: model_presets::Slots,
+    #[serde(rename = "defaultModels", skip_serializing)]
+    legacy_default_models: Vec<Option<ModelFavorite>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    model_favorites: Vec<ModelFavorite>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     runtime_overrides: BTreeMap<String, RuntimePreferences>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -116,7 +119,8 @@ impl Default for Preferences {
             provider_executables: BTreeMap::new(),
             provider_presets: HashSet::new(),
             models: BTreeMap::new(),
-            default_models: Default::default(),
+            legacy_default_models: Vec::new(),
+            model_favorites: Vec::new(),
             runtime_overrides: BTreeMap::new(),
             provider_environment: BTreeMap::new(),
             projects: Vec::new(),
@@ -156,7 +160,22 @@ impl Preferences {
 
     pub fn load(state: &Path) -> Result<Self> {
         match fs::read(state.join("preferences.json")) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Ok(bytes) => {
+                let mut prefs: Self = serde_json::from_slice(&bytes)?;
+                for favorite in std::mem::take(&mut prefs.legacy_default_models)
+                    .into_iter()
+                    .flatten()
+                {
+                    if !prefs
+                        .model_favorites
+                        .iter()
+                        .any(|saved| saved.same_selection(&favorite))
+                    {
+                        prefs.model_favorites.push(favorite);
+                    }
+                }
+                Ok(prefs)
+            }
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(err.into()),
         }
@@ -183,7 +202,6 @@ pub(crate) enum SettingsTarget<'a> {
     Overview,
     Provider(&'a ProviderInstanceId),
     ProviderMcp(&'a ProviderInstanceId),
-    DefaultModels,
     #[cfg(target_os = "macos")]
     ProjectActions(PathBuf),
 }
@@ -194,7 +212,6 @@ enum Page {
     Overview,
     General,
     Appearance,
-    DefaultModels,
     Providers,
     Projects,
     ProjectActions,
@@ -209,7 +226,6 @@ impl Page {
             Self::Overview => "Settings",
             Self::General => "General",
             Self::Appearance => "Appearance",
-            Self::DefaultModels => "Default Models",
             Self::Providers => "Providers",
             Self::Projects => "Projects",
             Self::ProjectActions => "Project actions",
@@ -244,7 +260,6 @@ pub struct Settings {
     machines: machines::Fields,
     model_catalog: Option<Entity<ProviderCatalog>>,
     catalog_subscription: Option<Subscription>,
-    preset_catalogs: BTreeMap<String, (Entity<ProviderCatalog>, Subscription)>,
     advanced: bool,
     runtime_fields: RuntimeFields,
     environment_rows: Option<Vec<environment::EnvironmentRow>>,
@@ -301,7 +316,6 @@ impl Settings {
             machines: machines::Fields::new(_executor, window, cx),
             model_catalog: None,
             catalog_subscription: None,
-            preset_catalogs: BTreeMap::new(),
             advanced: false,
             runtime_fields,
             environment_rows: None,
@@ -324,7 +338,6 @@ impl Settings {
                     return;
                 }
             }
-            SettingsTarget::DefaultModels => self.show_page(Page::DefaultModels, window, cx),
             SettingsTarget::Provider(instance) => self.open_provider_settings(instance, window, cx),
             SettingsTarget::ProviderMcp(instance) => {
                 self.open_provider_mcp_settings(instance, window, cx);
@@ -341,7 +354,6 @@ impl Settings {
         }
         self.project_editor = None;
         self.action_editor = None;
-        self.preset_catalogs.clear();
         self.page = Page::Overview;
         self.entry_page = Page::Overview;
         true
@@ -354,10 +366,6 @@ impl Settings {
         self.page = page;
         if page == Page::Worktrees {
             self.refresh_worktrees(cx);
-        }
-        self.preset_catalogs.clear();
-        if page == Page::DefaultModels {
-            self.request_preset_catalogs(false, cx);
         }
         self.project_editor = None;
         self.action_editor = None;
@@ -638,11 +646,6 @@ impl Settings {
                         "Connections, models, and setup",
                     ),
                     (
-                        Page::DefaultModels,
-                        IconName::Settings2,
-                        "Save model, effort, and speed presets",
-                    ),
-                    (
                         Page::Projects,
                         IconName::Folder,
                         "Manage Git checkouts saved for new conversations",
@@ -766,7 +769,6 @@ impl Settings {
             Page::Overview => Self::overview(cx),
             Page::General => self.general(cx),
             Page::Appearance => self.appearance(cx),
-            Page::DefaultModels => self.default_models_panel(cx),
             Page::Providers => self.render_provider_panel(cx),
             Page::Projects => self.projects_panel(cx),
             Page::ProjectActions => self.project_actions_panel(cx),

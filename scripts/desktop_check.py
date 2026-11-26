@@ -34,7 +34,7 @@ def launch_thread(checkout, name, provider="Codex", *, branch=None, base=None, c
     return [
         {"key": "cmd-shift-n"}, {"click": "Git checkout"}, {"key": "cmd-a"}, {"type": str(checkout)},
         *([{"click": "model-automatic"}, {"click": f"provider/{provider}"},
-           {"click": "model-option-automatic"}] if provider != "Codex" else []),
+           {"key": "escape"}] if provider != "Codex" else []),
         {"click": "Conversation name"}, {"type": name},
         *([{"click": "New worktree branch (optional)"}, {"type": branch}] if branch else []),
         *([{"see": "From main (remote)"}, {"click": "Choose base branch"},

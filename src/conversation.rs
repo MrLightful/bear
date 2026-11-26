@@ -7,7 +7,6 @@ mod launch_workspace;
 pub(crate) mod markdown_view;
 mod mcp_status;
 mod models;
-pub(crate) use models::effort_label;
 mod project_actions;
 mod projects;
 mod sidebar;
@@ -195,9 +194,7 @@ pub struct Desktop {
     instance: ProviderInstanceId,
     launch_model: Option<String>,
     launch_model_options: ModelOptions,
-    launch_model_overridden: bool,
     model_picker: Option<Entity<ListState<Models>>>,
-    show_model_efforts: bool,
     mcp_status: Option<mcp_status::McpStatus>,
     mcp_status_focus: FocusHandle,
     model_catalogs: HashMap<(ProviderInstanceId, PathBuf), Entity<ProviderCatalog>>,
@@ -246,8 +243,7 @@ impl Desktop {
         cx.observe(&settings, |view, settings, cx| {
             view.agent_activity
                 .update_preferences(settings.read(cx).preferences(), &view.threads);
-            if view.current.is_none() && !view.launch_model_overridden {
-                view.apply_launch_model_default(cx);
+            if view.current.is_none() {
                 view.preload_models(cx);
             }
             cx.notify();
@@ -362,9 +358,7 @@ impl Desktop {
             instance: Provider::Codex.key().into(),
             launch_model: None,
             launch_model_options: ModelOptions::default(),
-            launch_model_overridden: false,
             model_picker: None,
-            show_model_efforts: false,
             mcp_status: None,
             mcp_status_focus: cx.focus_handle(),
             model_catalogs: HashMap::new(),
@@ -381,12 +375,8 @@ impl Desktop {
                 if view.current.is_none() {
                     view.suggestions = Default::default();
                 }
-                if view.current.is_none() && !view.launch_model_overridden {
-                    view.apply_launch_model_default(cx);
-                } else {
-                    view.launch_model = None;
-                    view.launch_model_options = ModelOptions::default();
-                }
+                view.launch_model = None;
+                view.launch_model_options = ModelOptions::default();
                 view.model_picker = None;
                 view.mcp_status = None;
                 view.launch_workspace = LaunchWorkspace::default();
@@ -415,7 +405,6 @@ impl Desktop {
             }
         })
         .detach();
-        view.apply_launch_model_default(cx);
         let restored = view.restore(window, cx);
         view.watch_merged_prs(cx);
         view.agent_activity
@@ -939,14 +928,15 @@ impl Desktop {
             cx.notify();
             return;
         }
-        self.launch_model_overridden = false;
         self.subscription = None;
         self.command_log = None;
         self.current = None;
         self.pull_request_watch = None;
         self.pull_request = None;
         self.launch_workspace = LaunchWorkspace::default();
-        self.apply_launch_model_default(cx);
+        self.instance = Provider::Codex.key().into();
+        self.launch_model = None;
+        self.launch_model_options = ModelOptions::default();
         self.load_launch_branches(false, cx);
         self.preload_models(cx);
         self.error = None;
@@ -1356,7 +1346,6 @@ impl Desktop {
 
     fn choose_provider(&mut self, id: &ProviderInstanceId, cx: &mut Context<Self>) {
         if self.instance != *id {
-            self.launch_model_overridden = true;
             self.instance.clone_from(id);
             self.launch_model = None;
             self.launch_model_options = ModelOptions::default();

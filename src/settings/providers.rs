@@ -993,7 +993,7 @@ fn provider_tile_button(id: impl Into<ElementId>, selected: bool, cx: &App) -> B
         .when(selected, |button| button.border_color(cx.theme().ring))
 }
 
-fn provider_logo(provider: Provider, size: Pixels, cx: &App) -> Svg {
+pub(crate) fn provider_logo(provider: Provider, size: Pixels, cx: &App) -> Svg {
     let logo = match provider {
         Provider::Codex => "provider-logos/codex.svg",
         Provider::ClaudeAgent => "provider-logos/claude.svg",

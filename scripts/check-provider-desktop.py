@@ -90,7 +90,7 @@ def check_models(executable, tmp, env):
         {"key": "escape"}, {"click": "First message"},
         {"key": "cmd-shift-n"}, {"click": "Git checkout"}, {"key": "cmd-a"}, {"type": str(checkout)},
         {"see": "provider-status/Codex app-server · version unknown · login unverified · 2 models"},
-        {"click": default}, {"see": "model-option-automatic/name/Fixture Fast"},
+        {"click": default}, {"see": "model-option/fixture-fast/name/Fixture Fast"},
         {"right_of": ["Edit", "Model search and results"]},
         {"see": "model-option/fixture-fast"}, {"type": "Fixture Deep"},
         {"absent": "model-option/fixture-fast"}, {"key": "enter"}, {"see": "model/fixture-deep"},
@@ -99,11 +99,15 @@ def check_models(executable, tmp, env):
         {"key": "escape"}, {"click": default}, {"click": "provider/Codex"},
         {"click": "model-option/fixture-deep"}, {"click": "model/fixture-deep"},
         {"click": "Effort"}, {"click": "effort/high"}, {"click": "Fast mode off"}, {"see": "Fast mode on"},
+        {"click": "Save favorite"}, {"see": "Remove favorite"},
         {"key": "escape"}, {"click": "Conversation name"}, {"type": "Models"},
         {"click": "Open conversation"}, {"see": "status/Ready"}, {"see": "model/fixture-deep"},
         *send_message("First turn"), {"see": "Ready/Models/Completed"},
         {"click": "model/fixture-deep"}, {"see": "Fast mode on"},
         {"click": "Fast mode on"}, {"see": "Fast mode off"},
+        {"click": "Save favorite"}, {"see": "Remove favorite"},
+        {"click": "Favorites"}, {"see": "model-favorite/fixture-deep/High · Fast"},
+        {"see": "model-favorite/fixture-deep/High · Standard"}, {"click": "provider/Codex"},
         {"click": "Edit"}, {"see": "Models"}, {"see": "provider/codex"},
         {"click": "Back to workspace"}, *send_message("Standard turn"), {"see": "Codex/reply Standard turn"},
         {"see": "Ready/Models/Completed"},
@@ -116,16 +120,32 @@ def check_models(executable, tmp, env):
     frames_path = checkout / "frames.ndjson"
     frames = [json.loads(line) for line in frames_path.read_text().splitlines()]
     assert sum(frame.get("method") == "model/list" for frame in frames) == 1
+    preferences = json.loads((state / "preferences.json").read_text())
+    assert "defaultModels" not in preferences
+    assert [favorite["options"] for favorite in preferences["modelFavorites"]] == [
+        {"effort": "high", "service_tier": "priority"},
+        {"effort": "high", "service_tier": "default"},
+    ]
     run_window(executable, state, [
+        {"see": "model/fixture-fast"}, {"click": "model/fixture-fast"}, {"click": "Favorites"},
+        {"click": "model-favorite/fixture-deep/High · Fast"}, {"click": "model/fixture-deep"},
+        {"see": "Fast mode on"}, {"see": "Remove favorite"}, {"click": "Remove favorite"},
+        {"click": "Favorites"}, {"absent": "model-favorite/fixture-deep/High · Fast"},
+        {"see": "model-favorite/fixture-deep/High · Standard"}, {"key": "escape"},
+        {"click": "model/fixture-deep"}, {"click": "model-option/fixture-fast"},
         {"see": "model/fixture-fast"}, {"click": "model/fixture-fast"},
-        {"click": "model-option-automatic"}, {"see": default},
-        *send_message("Default turn"), {"see": "Codex/reply Default turn"},
+        {"click": "model-option/fixture-deep"}, {"see": "model/fixture-deep"},
+        *send_message("Explicit turn"), {"see": "Codex/reply Explicit turn"},
         {"see": "Ready/Models/Completed"},
+        {"key": "cmd-n"}, {"click": default}, {"click": "provider/available"},
+        {"see": "model-option/grok-build"}, {"click": "Favorites"},
+        {"click": "model-favorite/fixture-deep/High · Standard"},
+        {"click": "model/fixture-deep"}, {"see": "Fast mode off"}, {"key": "escape"},
     ], env)
     frames = [json.loads(line) for line in (checkout / "frames.ndjson").read_text().splitlines()]
     for methods in (("thread/start", "thread/resume"), ("turn/start",)):
         assert [f["params"].get("model") for f in frames if f.get("method") in methods] == [
-            "fixture-deep", "fixture-deep", "fixture-fast", None]
+            "fixture-deep", "fixture-deep", "fixture-fast", "fixture-deep"]
     turns = [f["params"] for f in frames if f.get("method") == "turn/start"]
     assert [p.get("effort") for p in turns] == ["high", "high", None, None]
     assert [p.get("serviceTierForTurn") for p in turns] == ["priority", "default", None, None]
@@ -133,9 +153,9 @@ def check_models(executable, tmp, env):
     config = checkout / "codex-fixture-config.json"
     config.write_text(json.dumps({"model": "fixture-deep", "model_reasoning_effort": "high", "service_tier": "priority"}))
     run_window(executable, state, [
-        {"click": default}, {"see": "model-option-automatic/name/Fixture Deep"},
+        {"click": "model/fixture-deep"}, {"see": "model-option/fixture-deep/name/Fixture Deep"},
         {"see": "Fast mode on"}, {"click": "Effort"},
-        {"click": "effort/medium"}, {"click": "Effort"}, {"click": "effort/default"},
+        {"absent": "effort/default"}, {"click": "effort/medium"}, {"click": "Effort"}, {"click": "effort/high"},
         {"key": "escape"}, *send_message("Configured defaults"),
         {"see": "Codex/reply Configured defaults"}, {"see": "Ready/Models/Completed"},
     ], env)
@@ -147,12 +167,48 @@ def check_models(executable, tmp, env):
     config.unlink()
     (checkout / "empty-model-list").touch()
     run_window(executable, state, [
-        {"click": default}, {"see": "model-status/This provider listed no models."},
-        {"see": "model-option-automatic/name/Automatic"},
-        {"see": "Retry models"}, {"click": "model-option-automatic"},
+        {"click": "model/fixture-deep"}, {"see": "model-status/This provider listed no models."},
+        {"absent": "model-option-automatic"},
+        {"see": "Retry models"}, {"key": "escape"},
         *send_message("Empty catalog"), {"see": "Codex/reply Empty catalog"},
         {"see": "Ready/Models/Completed"},
     ], env)
+
+
+def check_legacy_model_favorites(executable, tmp, env):
+    state = tmp / "favorite-migration"
+    state.mkdir()
+    preferences = state / "preferences.json"
+    legacy = {
+        "provider": "codex", "model": "fixture-deep", "name": "Fixture Deep",
+        "options": {"effort": None, "service_tier": None},
+    }
+    existing = {
+        "provider": "codex", "model": "fixture-deep", "name": "Previous model name",
+        "options": {"effort": "high", "service_tier": "priority"},
+    }
+    offline = dict(existing, provider="unavailable", model="offline-model", name="Offline Model")
+    preferences.write_text(json.dumps({
+        "defaultModels": [None, legacy, existing, None, None],
+        "modelFavorites": [existing, offline],
+    }))
+    migrated = "model-favorite/fixture-deep/Medium · Standard"
+    unavailable = "unavailable-model-favorite/offline-model/High · Fast"
+    run_window(executable, state, [
+        {"click": "Settings"}, {"absent": "Default Models"}, {"click": "Back to workspace"},
+        {"click": "model-automatic"}, {"absent": "Edit default models"},
+        {"see": "model-option/fixture-deep"}, {"type": "Automatic"},
+        {"absent": "model-option-automatic"}, {"absent": "model-option/fixture-deep"},
+        {"click": "Favorites"}, {"click": unavailable}, {"see": "model-automatic"},
+        {"click": "remove-model-favorite/unavailable/offline-model/High · Fast"}, {"absent": unavailable},
+        {"type": "Fixture Deep"},
+        {"see": "model-favorite/fixture-deep/High · Fast"}, {"click": migrated},
+        {"click": "model/fixture-deep"}, {"click": "Remove favorite"},
+        {"click": "Favorites"}, {"absent": migrated}, {"see": "model-favorite/fixture-deep/High · Fast"},
+    ], dict(env, HUGGLER_CODEX=str(ROOT / "tests/fixtures/context-provider.py")))
+    saved = json.loads(preferences.read_text())
+    assert "defaultModels" not in saved
+    assert saved["modelFavorites"] == [existing]
 
 
 def check_suggestions(executable, tmp, env):
@@ -310,14 +366,15 @@ def main():
             {"click": "Edit"}, {"see": "Installation guide"}, {"absent": "Models"},
             {"click": "Back to workspace"}, {"click": "model-automatic"},
             {"see": "model-status/Choose a provider to load models."}, {"click": "provider/available"},
-            {"see": "model-option-automatic/name/Grok Build"},
-            {"click": "model-option-automatic"}, {"absent": "model-option-automatic"},
+            {"see": "model-option/grok-build/name/Grok Build"},
+            {"click": "model-option/grok-build"}, {"absent": "model-option/grok-build"},
             {"click": "Check provider"},
             {"see": status + "ACP v1 · 1 · login unverified · 2 models"},
         ]
         env = dict(isolated_env(tmp), HUGGLER_PROVIDERS=str(config), HUGGLER_CODEX=str(missing))
         check_provider_presets(executable, tmp, env)
         check_models(executable, tmp, env)
+        check_legacy_model_favorites(executable, tmp, env)
         check_suggestions(executable, tmp, env)
         check_mcp_settings(executable, tmp, env)
         check_mcp_status(executable, tmp, env)
