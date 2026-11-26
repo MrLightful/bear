@@ -673,6 +673,7 @@ impl Desktop {
                     .small()
                     .h_full()
                     .px_3()
+                    .icon(Icon::default().path("icons/chat.svg"))
                     .label("Chat")
                     .on_click(cx.listener(|view, _, window, cx| view.return_to_chat(window, cx)))
             )))

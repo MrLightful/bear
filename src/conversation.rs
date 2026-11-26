@@ -166,6 +166,7 @@ pub struct Desktop {
     launch_workspace: LaunchWorkspace,
     branch: Entity<InputState>,
     launching: Option<LaunchProgress>,
+    pending_first_messages: HashSet<ThreadId>,
     name: Entity<InputState>,
     starter: Entity<InputState>,
     starter_attachments: Attachments,
@@ -328,6 +329,7 @@ impl Desktop {
                 .new(|cx| InputState::new(window, cx).placeholder("Generated from the title")),
             launch_workspace: LaunchWorkspace::default(),
             launching: None,
+            pending_first_messages: HashSet::new(),
             name: cx.new(|cx| InputState::new(window, cx).placeholder("Name this conversation…")),
             launch_setup: false,
             starter_attachments: Attachments::default(),
@@ -415,6 +417,11 @@ impl Desktop {
                                     window,
                                     cx,
                                 );
+                                for thread in &list.threads {
+                                    if thread.status.is_some() {
+                                        view.pending_first_messages.remove(&thread.id);
+                                    }
+                                }
                                 view.threads = list.threads;
                                 cx.notify();
                             }
@@ -998,6 +1005,9 @@ impl Desktop {
         let thread = id.clone();
         let first_message = (!message.trim().is_empty() || !attachments.is_empty(&message))
             .then(|| attachments.action(&message));
+        if first_message.is_some() {
+            self.pending_first_messages.insert(id.clone());
+        }
         let launch_name = name.clone();
         let (report_stage, mut stages) = tokio::sync::mpsc::unbounded_channel();
         let launch = cx.background_spawn(async move {
@@ -1110,6 +1120,9 @@ impl Desktop {
                 }
                 match result {
                     Ok((sent, worktree_project, history_error)) => {
+                        if sent.is_err() {
+                            v.pending_first_messages.remove(&id);
+                        }
                         if history_error.is_some() {
                             v.unsaved_worktree_history.insert(id.clone());
                         }
@@ -1162,6 +1175,7 @@ impl Desktop {
                         }
                     }
                     Err(error) => {
+                        v.pending_first_messages.remove(&id);
                         if saved_draft.is_none()
                             && v.starter.read(cx).value().is_empty()
                             && v.starter_attachments.is_empty("")
