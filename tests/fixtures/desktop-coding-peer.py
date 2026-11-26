@@ -63,8 +63,9 @@ for line in sys.stdin:
         emit(id=frame["id"], result={"thread": {"id": session}, "model": "fixture-model"})
     elif method == "turn/start":
         prompt = params["input"][0]["text"]
-        if prompt.startswith("Create a pull request from this conversation"):
-            assert "Follow the bundled Bear skill" in prompt
+        if prompt.startswith("/create-pr\n"):
+            assert 'Text attachment "PR context.txt"' in prompt
+            assert "## Merge Danger" not in prompt
             inspect, publish = [
                 shlex.split(block.split("\n", 1)[1].strip())
                 for block in prompt.split("```") if block.startswith("sh\n")
@@ -78,6 +79,8 @@ for line in sys.stdin:
                 complete(inspected.stderr.strip())
                 continue
             snapshot = json.loads(inspected.stdout)
+            assert "name: create-pr" in snapshot["skill"]
+            assert "## Merge Danger" in snapshot["skill"]
             root = Path.cwd().parent
             scenario_file = root / "commit-message.json"
             scenario = json.loads(scenario_file.read_text()) if scenario_file.exists() else "success"
