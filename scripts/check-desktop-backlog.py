@@ -28,7 +28,9 @@ def check(executable, root, screenshots=None):
     marker = "⟦Attachment 1: notes.txt⟧"
     send = f"Send draft/{title}"
     card = f"Draft card/{title}"
-    actions = f"Draft actions/{title}"
+    edit = f"Edit draft/{title}"
+    prompt_preview = f"Draft prompt/{title}"
+    title_field = f"Draft title/{title}"
     details = f"Draft details/{title}"
     details_panel = f"Draft details panel/{title}"
     def capture(name):
@@ -36,8 +38,12 @@ def check(executable, root, screenshots=None):
             return []
         return [{"screenshot": {"name": name, "path": str(screenshots / f"{name}.png")}}]
 
-    compact = [] if screenshots is None else [
-        {"resize": [640, 600]}, {"click": "Hide conversations"}, *capture("compact"),
+    appearances = [] if screenshots is None else [
+        {"click": "Settings"}, {"click": "Appearance"}, {"click": "Light"},
+        {"click": "Backlog"}, *capture("wide-light"),
+        {"resize": [640, 600]}, {"same_line": [details, send]}, *capture("compact-light"),
+        {"resize": [1120, 740]}, {"click": "Settings"}, {"click": "Appearance"},
+        {"click": "Dark"}, {"click": "Backlog"}, *capture("wide-dark"),
     ]
     run_window(executable, state, [
         {"above": ["Settings", "Backlog"]}, {"click": "Backlog"},
@@ -53,25 +59,28 @@ def check(executable, root, screenshots=None):
         {"see": "suggestion//build-guide"}, {"key": "enter"},
         {"type": "Review the attached notes."},
         {"next_file_selection": [str(attachment)]}, {"click": "Attach files"},
-        {"key": "cmd-a"}, {"key": "cmd-c"}, {"clipboard_contains": marker}, {"click": "Save to Backlog"}, {"see": send},
+        {"key": "cmd-a"}, {"key": "cmd-c"}, {"clipboard_contains": marker},
+        *capture("composer"), {"click": "Save to Backlog"}, {"see": send},
         {"absent": f"thread/{title}"},
+        {"above": [prompt_preview, edit]}, {"absent": title_field},
         {"absent": details_panel}, {"click": details}, {"see": details_panel},
+        {"see": title_field},
         *capture("details"),
         {"click": details}, {"absent": details_panel},
-        {"hover": card}, {"click": actions}, {"click": "Edit draft"},
+        {"click": edit}, {"absent": send},
+        {"above": ["Draft message", "Conversation title (optional)"]}, *capture("edit"),
+        {"click": "Cancel draft edit"}, {"see": send}, {"click": edit},
         {"click": "Draft message"}, {"key": "cmd-a"}, {"type": prompt},
         {"click": "Save draft changes"}, {"see": card},
         {"click": "Create a draft"}, {"click": "First message"},
         {"type": "Discard this draft"}, {"click": "Save to Backlog"},
-        {"hover": "Draft card/Discard this draft"}, {"hover": "Backlog"},
-        *capture("wide"),
-        {"hover": card}, {"see": send}, *capture("hover"),
-        {"click": actions}, {"see": "Edit draft"}, *capture("menu"), {"key": "escape"},
-        {"hover": "Draft card/Discard this draft"}, {"click": "Draft actions/Discard this draft"},
-        {"next_prompt_answer": 0}, {"click": "Delete draft"}, {"see": "Draft card/Discard this draft"},
-        {"hover": "Draft card/Discard this draft"}, {"click": "Draft actions/Discard this draft"},
-        {"next_prompt_answer": 1}, {"click": "Delete draft"}, {"absent": "Draft card/Discard this draft"},
-        *compact,
+        *appearances,
+        {"absent": "Delete draft/Discard this draft"},
+        {"click": "Draft details/Discard this draft"},
+        {"next_prompt_answer": 0}, {"click": "Delete draft/Discard this draft"},
+        {"see": "Draft card/Discard this draft"},
+        {"next_prompt_answer": 1}, {"click": "Delete draft/Discard this draft"},
+        {"absent": "Draft card/Discard this draft"},
     ], env)
     attachment.unlink()
     draft_path, = (state / "backlog").glob("*.draft")
@@ -80,16 +89,16 @@ def check(executable, root, screenshots=None):
     checkout.rename(unavailable)
     run_window(executable, state, [
         {"click": "Backlog"}, {"absent": details_panel},
-        {"hover": card}, {"click": send}, {"contains": "Could not open"},
+        {"click": send}, {"contains": "Could not open"},
         {"see": send},
-        *([{"resize": [960, 640]}, {"hover": card}, {"see": send}, *capture("retry")] if screenshots else []),
+        *([{"resize": [960, 640]}, *capture("retry")] if screenshots else []),
     ], env)
     unavailable.rename(checkout)
     subprocess.run(["git", "init", "-qb", "main", root], check=True)
     git_directory = root / "project-git"
     (checkout / ".git").rename(git_directory)
     run_window(executable, state, [
-        {"click": "Backlog"}, {"hover": card}, {"click": send},
+        {"click": "Backlog"}, {"click": send},
         {"contains": "points to a different Git repository"}, {"see": send},
     ], env)
     git_directory.rename(checkout / ".git")
@@ -100,7 +109,7 @@ def check(executable, root, screenshots=None):
     metadata["files"][0]["name"] = "invalid/name.txt"
     draft_path.write_bytes(json.dumps(metadata).encode() + b"\n" + payload)
     run_window(executable, state, [
-        {"click": "Backlog"}, {"hover": card}, {"click": send},
+        {"click": "Backlog"}, {"click": send},
         {"contains": "Could not send draft"}, {"see": send},
     ], env)
     with sqlite3.connect(state / "huggler.sqlite3") as db:
@@ -108,7 +117,7 @@ def check(executable, root, screenshots=None):
         assert db.execute("SELECT count(*) FROM message WHERE role='user'").fetchone() == (0,)
     draft_path.write_bytes(saved_draft)
     run_window(executable, state, [
-        {"click": "Backlog"}, {"hover": card}, {"click": send},
+        {"click": "Backlog"}, {"click": send},
         {"see": f"Ready/{title}/Completed"},
         {"click": "Backlog"}, {"absent": send}, {"see": "Create a draft"},
         *capture("empty"),
@@ -117,7 +126,7 @@ def check(executable, root, screenshots=None):
     assert not draft_path.exists()
     draft_path.write_bytes(saved_draft)
     run_window(executable, state, [
-        {"click": "Backlog"}, {"hover": card}, {"click": send},
+        {"click": "Backlog"}, {"click": send},
         {"see": f"Ready/{title}/Completed"},
         {"click": "Backlog"}, {"absent": send},
     ], env)
