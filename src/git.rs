@@ -1052,49 +1052,11 @@ impl PendingCommit {
         command
     }
 
-    pub fn message_prompt(&self, root: &Path) -> Result<String> {
-        let mut summary = self.git(root);
-        summary.args([
-            "diff",
-            "--cached",
-            "--name-status",
-            "--no-relative",
-            "--no-color",
-            &self.head,
-            "--",
-        ]);
-        let mut patch = self.git(root);
-        patch.args([
-            "diff",
-            "--cached",
-            "--patch",
-            "--no-relative",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            &self.head,
-            "--",
-        ]);
-        let mut subjects = git(root);
-        subjects.args(["log", "-8", "--format=%s", &self.head, "--"]);
-        let bounded = |command, limit| {
-            let mut bytes = Vec::new();
-            read_patch(command, false, limit, &mut bytes)?;
-            let mut result = String::from_utf8_lossy(&bytes).into_owned();
-            if bytes.len() == limit {
-                result.push_str("\n[truncated]");
-            }
-            Ok::<_, anyhow::Error>(result)
-        };
-        Ok(format!(
-            "Write one Git commit message for these changes. Use a concise, specific subject in imperative mood and follow the style of the recent subjects. Use an empty body unless it adds useful context.\n\nRecent commit subjects:\n{}\n\nChanged paths:\n{}\n\nPatch:\n{}",
-            bounded(subjects, 2000)?,
-            bounded(summary, 8000)?,
-            bounded(patch, 50_000)?,
-        ))
+    pub fn tree_oid(&self) -> String {
+        String::from_utf8_lossy(&self.tree).trim_end().to_owned()
     }
 
-    pub fn commit(&self, root: &Path, subject: &str, body: &str) -> Result<String> {
+    pub fn commit(&self, root: &Path, subject: &str) -> Result<String> {
         let index_path = index_path(root)?;
         let mut lock_path = index_path.clone().into_os_string();
         lock_path.push(".lock");
@@ -1113,9 +1075,6 @@ impl PendingCommit {
             .context("The working changes changed while writing the commit message. Review them and try again.")?;
         let mut command = prepared.git(root);
         command.args(["commit", "--cleanup=whitespace", "-m", subject]);
-        if !body.is_empty() {
-            command.args(["-m", body]);
-        }
         self.verify_head(root)?;
         execute(&mut command).context("Commit changes for the pull request")?;
         fs::copy(prepared.index.path().join("index"), &index_lock)
@@ -1152,7 +1111,7 @@ impl PendingCommit {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct GitHubBranch {
     pub owner: String,
     pub repo: String,
@@ -1318,21 +1277,6 @@ impl GitHubBranch {
         ))
     }
 
-    pub fn pr_text(&self, root: &Path) -> Result<(String, String)> {
-        let output =
-            execute(git(root).args(["show", "-s", "--format=%s%x00%b", &self.local_oid, "--"]))?;
-        let output = String::from_utf8_lossy(&output);
-        let (title, body) = output
-            .split_once('\0')
-            .context("Expected a commit message.")?;
-        let title = if title.trim().is_empty() {
-            &self.head
-        } else {
-            title.trim()
-        };
-        Ok((title.to_owned(), body.trim().to_owned()))
-    }
-
     pub fn verify_push_target(&self, root: &Path) -> Result<()> {
         let preferred_remote =
             match git_config(root, &format!("branch.{}.pushRemote", self.local_branch))? {
@@ -1402,11 +1346,15 @@ impl GitHubBranch {
     }
 
     pub fn same_target(&self, other: &Self) -> bool {
+        self.local_oid == other.local_oid
+            && self.set_upstream == other.set_upstream
+            && self.same_branch(other)
+    }
+
+    pub fn same_branch(&self, other: &Self) -> bool {
         self.local_branch == other.local_branch
-            && self.local_oid == other.local_oid
             && self.remote == other.remote
             && self.head == other.head
-            && self.set_upstream == other.set_upstream
             && self.owner.eq_ignore_ascii_case(&other.owner)
             && self.repo.eq_ignore_ascii_case(&other.repo)
     }

@@ -51,6 +51,25 @@ actions!(
 );
 
 fn main() -> Result<()> {
+    let mut args = std::env::args_os().skip(1);
+    match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some(mode @ ("--inspect-pull-request" | "--publish-pull-request")) => {
+            let target = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .context("Expected the pull request target")?;
+            anyhow::ensure!(args.next().is_none(), "Unexpected pull request argument");
+            if mode == "--inspect-pull-request" {
+                println!("{}", github::inspect_pull_request(&target)?);
+            } else {
+                let url = tokio::runtime::Runtime::new()?
+                    .block_on(github::publish_from_stdin(&target))?;
+                println!("{url}");
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
     let paths = paths::StoragePaths::discover()?;
     #[cfg(all(feature = "qualification", target_os = "macos"))]
     let driver = qualification::load()?;

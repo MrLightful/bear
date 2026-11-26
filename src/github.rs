@@ -2,8 +2,7 @@
 use crate::git;
 use anyhow::{Context, Result, bail, ensure};
 use huggler::{
-    Huggler, Provider, ProviderInstanceId, ThreadId,
-    providers::codex::generate_commit_message,
+    Huggler, ThreadId,
     repository::{
         Driver, RepositoryClient,
         github::{
@@ -11,8 +10,9 @@ use huggler::{
         },
     },
 };
+use serde::{Deserialize, Serialize};
 use std::{
-    io,
+    io::{self, Read},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -105,10 +105,116 @@ fn primary_action(branch: &git::GitHubBranch, pr: &PullRequest) -> Action {
 #[derive(Clone)]
 pub(super) struct Checkout {
     pub runtime: Arc<Huggler>,
-    pub thread: ThreadId,
+    pub thread: Option<ThreadId>,
     pub root: PathBuf,
-    pub provider: ProviderInstanceId,
-    pub model: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PublishTarget {
+    root: PathBuf,
+    branch: git::GitHubBranch,
+    configured_base: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PullRequestText {
+    head_oid: String,
+    pending_tree: Option<String>,
+    title: String,
+    body: String,
+    commit_subject: Option<String>,
+}
+
+pub fn create_request(root: &Path, branch: &git::GitHubBranch) -> Result<String> {
+    let target = PublishTarget {
+        root: root.to_owned(),
+        branch: branch.clone(),
+        configured_base: branch.configured_pr_base(root)?,
+    };
+    let executable = std::env::current_exe()?;
+    let executable = executable
+        .to_str()
+        .context("The Bear executable path is not UTF-8.")?;
+    let target_json = serde_json::to_string(&target)?;
+    let command = |mode| -> Result<String> {
+        Ok([executable, mode, &target_json]
+            .map(shlex::try_quote)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" "))
+    };
+    Ok(format!(
+        "Create a pull request from this conversation’s checkout. Follow the bundled Bear skill below.\n\n{}\n\nInspect:\n\n```sh\n{}\n```\n\nPublish (send the PR payload on stdin):\n\n```sh\n{}\n```",
+        include_str!("../assets/skills/create-pr/SKILL.md"),
+        command("--inspect-pull-request")?,
+        command("--publish-pull-request")?,
+    ))
+}
+
+impl PublishTarget {
+    fn validate(&self) -> Result<git::GitHubBranch> {
+        let branch = git::github_branch(&self.root)?;
+        ensure!(
+            branch.same_branch(&self.branch)
+                && branch.configured_pr_base(&self.root)? == self.configured_base,
+            "The checkout or PR base changed since Create PR was queued. Try again."
+        );
+        Ok(branch)
+    }
+}
+
+pub fn inspect_pull_request(target_json: &str) -> Result<serde_json::Value> {
+    let target: PublishTarget = serde_json::from_str(target_json)?;
+    let branch = target.validate()?;
+    let pending = git::PendingCommit::prepare(&target.root, &branch)?;
+    Ok(serde_json::json!({
+        "repository": format!("{}/{}", branch.owner, branch.repo),
+        "configured_base": target.configured_base,
+        "head_oid": branch.local_oid,
+        "pending_tree": pending.as_ref().map(git::PendingCommit::tree_oid),
+    }))
+}
+
+pub async fn publish_from_stdin(target_json: &str) -> Result<String> {
+    let target: PublishTarget = serde_json::from_str(target_json)?;
+    let mut input = Vec::new();
+    const MAX_PAYLOAD: u64 = 128 * 1024;
+    io::stdin()
+        .lock()
+        .take(MAX_PAYLOAD + 1)
+        .read_to_end(&mut input)?;
+    ensure!(
+        input.len() as u64 <= MAX_PAYLOAD,
+        "The PR payload is too large."
+    );
+    let text: PullRequestText =
+        serde_json::from_slice(&input).context("Read PR title and description")?;
+    ensure!(
+        valid_subject(&text.title),
+        "The PR title must be a single nonempty line."
+    );
+    ensure!(!text.body.trim().is_empty(), "The PR description is empty.");
+    if let Some(subject) = &text.commit_subject {
+        ensure!(
+            valid_subject(subject),
+            "The commit subject must be a single nonempty line."
+        );
+    }
+    let state = tempfile::tempdir()?;
+    let runtime = Arc::new(Huggler::open(huggler::HugglerOptions::new(state.path())).await?);
+    let checkout = Checkout {
+        runtime,
+        thread: None,
+        root: target.root.clone(),
+    };
+    let result = checkout.create_pull_request(&target, &text).await;
+    checkout.runtime.close().await?;
+    result
+}
+
+fn valid_subject(subject: &str) -> bool {
+    !subject.trim().is_empty() && !subject.chars().any(char::is_control)
 }
 
 struct PullRequestTarget {
@@ -250,11 +356,15 @@ impl Checkout {
             .with_context(|| format!("{error:#}"))
     }
 
-    pub async fn create_pull_request(&self, displayed: &git::GitHubBranch) -> Result<String> {
-        let original = git::github_branch(&self.root)?;
+    async fn create_pull_request(
+        &self,
+        requested: &PublishTarget,
+        text: &PullRequestText,
+    ) -> Result<String> {
+        let original = requested.validate()?;
         ensure!(
-            original.same_target(displayed),
-            "The checkout changed since Create PR appeared. Try again on the current branch."
+            original.local_oid == text.head_oid,
+            "HEAD changed while drafting the pull request. Try again."
         );
         let client = match self.client(&original).await {
             Ok(client) => client,
@@ -270,7 +380,8 @@ impl Checkout {
         let requests = client.github_pull_requests(&branch.head).await;
         self.verify_checkout(&original)?;
         ensure!(
-            original.configured_pr_base(&self.root)? == target.configured_base,
+            original.configured_pr_base(&self.root)? == requested.configured_base
+                && target.configured_base == requested.configured_base,
             "The pull request base changed. Try again."
         );
         let requests = match requests {
@@ -289,9 +400,24 @@ impl Checkout {
         );
         branch.verify_push_target(&self.root)?;
         let mut expected = original;
-        if dirty && let Some(pending) = git::PendingCommit::prepare(&self.root, &branch)? {
-            let prompt = pending.message_prompt(&self.root)?;
-            let (subject, body) = self.commit_message(&prompt).await?;
+        let pending = if dirty {
+            git::PendingCommit::prepare(&self.root, &branch)?
+        } else {
+            None
+        };
+        ensure!(
+            pending
+                .as_ref()
+                .map(git::PendingCommit::tree_oid)
+                .as_deref()
+                == text.pending_tree.as_deref(),
+            "The working changes changed while drafting the pull request. Review them and try again."
+        );
+        if let Some(pending) = pending {
+            let subject = text
+                .commit_subject
+                .as_deref()
+                .context("Supply a commit subject for the pending changes.")?;
             let requests = client.github_pull_requests(&branch.head).await?;
             verify_can_create(&expected, &branch.head, requests, true)?;
             self.verify_checkout(&expected)?;
@@ -300,7 +426,7 @@ impl Checkout {
                 "The pull request base changed. Try again."
             );
             branch.verify_push_target(&self.root)?;
-            let oid = pending.commit(&self.root, &subject, &body)?;
+            let oid = pending.commit(&self.root, subject)?;
             expected.local_oid.clone_from(&oid);
             branch.local_oid = oid;
         } else {
@@ -315,7 +441,6 @@ impl Checkout {
             !git::has_uncommitted_changes(&self.root)?,
             "The checkout has uncommitted changes. Review them and try again."
         );
-        let (title, body) = branch.pr_text(&self.root)?;
         self.verify_checkout(&expected)?;
         branch.push(&self.root).await?;
         let current = git::github_branch(&self.root)?;
@@ -335,7 +460,7 @@ impl Checkout {
             )
         };
         match client
-            .create_github_pull_request(&branch.head, base, &title, &body)
+            .create_github_pull_request(&branch.head, base, text.title.trim(), &text.body)
             .await
         {
             Ok(number) => Ok(url(number)),
@@ -357,28 +482,6 @@ impl Checkout {
                 )
             }
         }
-    }
-
-    async fn commit_message(&self, prompt: &str) -> Result<(String, String)> {
-        let mut instances = self.runtime.provider_instances();
-        let selected = instances
-            .find(|instance| instance.id == self.provider && instance.driver == Provider::Codex);
-        let instance = selected
-            .or_else(|| {
-                self.runtime
-                    .provider_instances()
-                    .find(|instance| instance.id.as_str() == "codex")
-            })
-            .context("Configure Codex to generate a commit message.")?;
-        generate_commit_message(
-            instance,
-            self.runtime.output(),
-            &self.root,
-            selected.and(self.model.as_deref()),
-            prompt,
-        )
-        .await
-        .context("Generate a commit message with Codex")
     }
 
     pub async fn update(
@@ -440,12 +543,16 @@ impl Checkout {
 
     async fn client(&self, branch: &git::GitHubBranch) -> Result<RepositoryClient> {
         let authorization = github_authorization().await?;
-        let binding = self.runtime.bind_thread_repository(
-            &self.thread,
-            Driver::GitHub,
-            &github_api_origin(),
-            &format!("{}/{}", branch.owner, branch.repo),
-        )?;
+        let origin = github_api_origin();
+        let repository = format!("{}/{}", branch.owner, branch.repo);
+        let binding = if let Some(thread) = &self.thread {
+            self.runtime
+                .bind_thread_repository(thread, Driver::GitHub, &origin, &repository)?
+        } else {
+            let project = self.runtime.open_project(&self.root)?;
+            self.runtime
+                .bind_repository(&project.id, Driver::GitHub, &origin, &repository)?
+        };
         Ok(self
             .runtime
             .repository_client(&binding.project, &binding.id, Some(&authorization))?)

@@ -9,8 +9,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
-from desktop_check import ROOT, isolated_env, launch_thread, run_window
+from desktop_check import ROOT, isolated_env, launch_thread, run_window, send_message
 
 
 GH = """#!/usr/bin/env python3
@@ -253,7 +255,7 @@ def check(binary, *, settlement_only=False):
             fixture.write_text(json.dumps(data))
             run_window(binary, state, steps, env)
 
-        def expect_creation(pr, title, body="", *, lost_receipt=False, base="main"):
+        def expect_creation(pr, title, body="Verification details for this fixture.", *, lost_receipt=False, base="main"):
             fixture.with_name("create.json").write_text(json.dumps({
                 "pr": pr,
                 "payload": {"head": "review", "base": base, "title": title, "body": body},
@@ -272,7 +274,7 @@ def check(binary, *, settlement_only=False):
         (checkout / "removed.txt").unlink()
         (checkout / "new.txt").write_text("New content\n")
         status = git("--no-optional-locks", "status", "--porcelain")
-        show("switch_branch", {"click": "Create PR"}, {"contains": "checkout changed since Create PR"})
+        show("switch_branch", {"click": "Create PR"}, {"contains": "checkout or PR base changed since Create PR"})
         assert git("branch", "--show-current") == "other-topic"
         assert git("rev-parse", "HEAD") == base
         assert git("status", "--porcelain") == status
@@ -283,13 +285,13 @@ def check(binary, *, settlement_only=False):
         index_before = index.read_bytes()
         commit_message = root / "commit-message.json"
         commit_message.write_text(json.dumps("invalid"))
-        show(None, {"click": "Create PR"}, {"contains": "invalid commit message"})
+        show(None, {"click": "Create PR"}, {"contains": "commit subject must be a single nonempty line"})
         assert git("rev-parse", "HEAD") == base
         assert index.read_bytes() == index_before
         assert git("status", "--porcelain") == status
         assert json.loads(fixture.read_text()) is None
         commit_message.write_text(json.dumps("edit"))
-        show(None, {"click": "Create PR"}, {"contains": "changed while writing the commit message"})
+        show(None, {"click": "Create PR"}, {"contains": "changed while drafting the pull request"})
         assert git("rev-parse", "HEAD") == base
         assert git("status", "--porcelain") == status
         assert (checkout / "new.txt").read_text() == "New content, edited during generation.\n"
@@ -315,8 +317,26 @@ def check(binary, *, settlement_only=False):
         git("update-ref", "-d", "refs/remotes/origin/main")
         git("update-ref", "-d", "refs/heads/main")
         expect_creation(pr, "Update review fixtures", "Cover staged, unstaged, new, and removed files.")
-        show(None, {"see": "Create PR"}, {"right_of": ["Create PR", "Open in"]},
-             {"click": "Create PR"}, {"see": "Merge"})
+        def release_when_pr_is_queued():
+            deadline = time.monotonic() + 15
+            with sqlite3.connect(state / "huggler.sqlite3") as db:
+                while not db.execute(
+                    "SELECT 1 FROM run WHERE status='queued' AND EXISTS "
+                    "(SELECT 1 FROM run WHERE status='running')"
+                ).fetchone():
+                    assert time.monotonic() < deadline, "Create PR did not queue behind the running turn"
+                    time.sleep(.05)
+            assert git("rev-parse", "HEAD") == base
+            assert json.loads(fixture.read_text()) is None
+            (root / "finish-review").touch()
+
+        with ThreadPoolExecutor() as pool:
+            queued = pool.submit(release_when_pr_is_queued)
+            show(None, {"see": "Create PR"}, {"right_of": ["Create PR", "Open in"]},
+                 *send_message("Finish the pending review changes."),
+                 {"contains": "Preparing the final review change."},
+                 {"click": "Create PR"}, {"see": "Merge"})
+            queued.result()
         head = git("rev-parse", "HEAD")
         pr["headRefOid"] = head
         assert head == remote_ref("review") and git("rev-parse", "HEAD^") == base
@@ -325,7 +345,7 @@ def check(binary, *, settlement_only=False):
         assert git("diff", "--name-status", base, head).splitlines() == [
             "A\tnew.txt", "D\tremoved.txt", "A\tstaged.txt", "M\tunstaged.txt",
         ]
-        assert git("show", "HEAD:new.txt") == "New content"
+        assert git("show", "HEAD:new.txt") == "Final content from the running turn."
         assert git("show", "HEAD:staged.txt") == "Staged content"
         assert git("show", "HEAD:unstaged.txt") == "Updated content"
         assert (checkout / "ignored.log").read_text() == "Ignore this.\n"
@@ -346,7 +366,7 @@ def check(binary, *, settlement_only=False):
         show(None, {"click": "Create PR"}, {"see": "Merge"})
         assert git("rev-parse", "@{upstream}") == head
         show("offline", {"click": "Create PR"},
-             {"opened_url": "https://github.com/fixture/project/compare/release...review?expand=1"})
+             {"contains": "https://github.com/fixture/project/compare/release...review?expand=1"})
 
         git("config", "branch.review.pushRemote", "fork")
         show(None, {"click": "Create PR"}, {"contains": "different Git push remote configured"})
