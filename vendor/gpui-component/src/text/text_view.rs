@@ -41,6 +41,7 @@ pub(crate) fn init(cx: &mut App) {
 struct TextViewElement {
     list_state: Option<ListState>,
     state: Entity<TextViewState>,
+    on_link_click: Option<LinkHandler>,
 }
 
 impl RenderOnce for TextViewElement {
@@ -49,12 +50,15 @@ impl RenderOnce for TextViewElement {
             v_flex()
                 .size_full()
                 .map(|this| match &mut state.parsed_result {
-                    Some(Ok(content)) => this.child(content.root_node.render_root(
-                        self.list_state.clone(),
-                        &content.node_cx,
-                        window,
-                        cx,
-                    )),
+                    Some(Ok(content)) => {
+                        content.node_cx.on_link_click = self.on_link_click;
+                        this.child(content.root_node.render_root(
+                            self.list_state.clone(),
+                            &content.node_cx,
+                            window,
+                            cx,
+                        ))
+                    }
                     Some(Err(err)) => this.child(
                         v_flex()
                             .gap_1()
@@ -66,6 +70,9 @@ impl RenderOnce for TextViewElement {
         })
     }
 }
+
+/// Callback that handles text link navigation instead of opening the URL directly.
+pub type LinkHandler = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>;
 
 /// Type for code block actions generator function.
 pub(crate) type CodeBlockActionsFn =
@@ -97,6 +104,7 @@ pub struct TextView {
     selectable: bool,
     scrollable: bool,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
+    on_link_click: Option<LinkHandler>,
 }
 
 #[derive(PartialEq)]
@@ -431,6 +439,7 @@ impl TextView {
             selectable: false,
             scrollable: false,
             code_block_actions: None,
+            on_link_click: None,
         }
     }
 
@@ -462,6 +471,7 @@ impl TextView {
             selectable: false,
             scrollable: false,
             code_block_actions: None,
+            on_link_click: None,
         }
     }
 
@@ -490,6 +500,12 @@ impl TextView {
                 }
             }
         }
+        self
+    }
+
+    /// Override navigation for links in text.
+    pub fn on_link_click(mut self, handler: LinkHandler) -> Self {
+        self.on_link_click = Some(handler);
         self
     }
 
@@ -660,6 +676,7 @@ impl Element for TextView {
                     None
                 },
                 state: self.state.clone(),
+                on_link_click: self.on_link_click.clone(),
             })
             .refine_style(&self.style)
             .vertical_scrollbar(list_state)

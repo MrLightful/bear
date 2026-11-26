@@ -5,13 +5,15 @@ use std::{
 };
 
 use gpui::{
-    point, px, quad, App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId,
-    GlobalElementId, Half, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    LayoutId, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout,
-    Window,
+    App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, GlobalElementId, Half,
+    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout, Window,
+    point, px, quad,
 };
 
-use crate::{global_state::GlobalState, input::Selection, text::node::LinkMark, ActiveTheme};
+use crate::{ActiveTheme, global_state::GlobalState, input::Selection, text::node::LinkMark};
+
+use super::LinkHandler;
 
 /// A inline element used to render a inline text and support selectable.
 ///
@@ -22,6 +24,7 @@ pub(super) struct Inline {
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     styled_text: StyledText,
+    on_link_click: Option<LinkHandler>,
 
     state: Arc<Mutex<InlineState>>,
 }
@@ -48,6 +51,7 @@ impl Inline {
         state: Arc<Mutex<InlineState>>,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        on_link_click: Option<LinkHandler>,
     ) -> Self {
         let text = state.lock().unwrap().text.clone();
         Self {
@@ -57,6 +61,7 @@ impl Inline {
             text: text.clone(),
             styled_text: StyledText::new(text),
             state,
+            on_link_click,
         }
     }
 
@@ -347,8 +352,12 @@ impl Element for Inline {
                 let links = self.links.clone();
                 let text_layout = text_layout.clone();
 
-                move |event: &MouseUpEvent, phase, _, cx| {
-                    if !bounds.contains(&event.position) || !phase.bubble() {
+                let on_link_click = self.on_link_click.clone();
+                move |event: &MouseUpEvent, phase, window, cx| {
+                    if (on_link_click.is_some() && event.button != gpui::MouseButton::Left)
+                        || !bounds.contains(&event.position)
+                        || !phase.bubble()
+                    {
                         return;
                     }
 
@@ -356,7 +365,11 @@ impl Element for Inline {
                         Self::link_for_position(&text_layout, &links, event.position)
                     {
                         cx.stop_propagation();
-                        cx.open_url(&link.url);
+                        if let Some(handler) = &on_link_click {
+                            handler(&link.url, window, cx);
+                        } else {
+                            cx.open_url(&link.url);
+                        }
                     }
                 }
             });
@@ -402,7 +415,7 @@ fn point_in_text_selection(
 #[cfg(test)]
 mod tests {
     use super::point_in_text_selection;
-    use gpui::{point, px, size, Bounds};
+    use gpui::{Bounds, point, px, size};
 
     #[test]
     fn test_point_in_text_selection() {

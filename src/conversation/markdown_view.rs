@@ -1,27 +1,34 @@
 mod mermaid;
 mod response_image;
 
-use super::transcript::transcript_muted;
+use super::{
+    Desktop,
+    document_tabs::{Document, open_workspace_file},
+    transcript::transcript_muted,
+};
+use anyhow::{Context as _, Result, ensure};
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Icon, IconName, h_flex,
-    text::{TextView, TextViewStyle},
+    text::{LinkHandler, TextView, TextViewStyle},
     v_flex,
 };
 use markdown::mdast::Node;
-use std::{borrow::Cow, path::Path};
+use percent_encoding::percent_decode_str;
+use std::{
+    borrow::Cow,
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+};
 
 pub(crate) fn prose(
     id: String,
     source: &str,
-    images: ResponseImages<'_>,
+    response: ResponseRenderContext<'_>,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
-    if !source.contains("![") && !contains_mermaid_fence(source) {
-        return Markdown::new(source).render(id, source, false, window, cx);
-    }
-    Markdown::parse(source.to_owned()).render_blocks(id, source, false, Some(images), window, cx)
+    Markdown::parse(source.to_owned()).render_blocks(id, source, Some(&response), None, window, cx)
 }
 
 pub(crate) fn contains_mermaid_fence(source: &str) -> bool {
@@ -37,10 +44,10 @@ pub(crate) fn contains_mermaid_fence(source: &str) -> bool {
     })
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct ResponseImages<'a> {
+pub(crate) struct ResponseRenderContext<'a> {
     pub(crate) run: &'a huggler::RunId,
     pub(crate) checkout: Option<&'a Path>,
+    pub(crate) desktop: Option<WeakEntity<Desktop>>,
     pub(crate) executor: &'a tokio::runtime::Handle,
     pub(crate) scroll: &'a ScrollHandle,
 }
@@ -53,7 +60,7 @@ pub(super) struct Markdown {
 
 impl Markdown {
     pub(super) fn new(source: &str) -> Self {
-        Self::parse(safe_markdown(source, false))
+        Self::parse(safe_markdown(source, false, false))
     }
 
     fn parse(source: String) -> Self {
@@ -79,22 +86,23 @@ impl Markdown {
         &self,
         id: String,
         raw: &str,
-        document: bool,
+        heading: Option<(&str, &ScrollHandle)>,
         window: &mut Window,
         cx: &mut App,
     ) -> Div {
-        self.render_blocks(id, raw, document, None, window, cx)
+        self.render_blocks(id, raw, None, heading, window, cx)
     }
 
     fn render_blocks(
         &self,
         id: String,
         raw: &str,
-        document: bool,
-        images: Option<ResponseImages<'_>>,
+        response: Option<&ResponseRenderContext<'_>>,
+        heading: Option<(&str, &ScrollHandle)>,
         window: &mut Window,
         cx: &mut App,
     ) -> Div {
+        let document = response.is_none();
         let mut body = v_flex()
             .w_full()
             .min_w_0()
@@ -105,20 +113,70 @@ impl Markdown {
         let Some(root) = &self.root else {
             return body.child(raw.to_owned());
         };
+        let on_link_click = response.and_then(workspace_link_handler);
+        let anchor = heading.and_then(|(fragment, scroll)| {
+            Some((
+                heading_index(root, fragment)?,
+                ScrollAnchor::for_handle(scroll.clone()),
+            ))
+        });
         let blocks = MarkdownBlock {
             source: &self.source,
             definitions: &self.definitions,
             in_list: false,
             quote_depth: 0,
             document,
-            images,
+            images: response,
+            on_link_click: on_link_click.as_ref(),
             root,
         };
         for (index, node) in root.children.iter().enumerate() {
-            body = body.children(blocks.render(node, &format!("{id}-{index}"), window, cx));
+            if let Some(block) = blocks.render(node, &format!("{id}-{index}"), window, cx) {
+                body = match anchor.as_ref().filter(|(target, _)| index == *target) {
+                    Some((_, anchor)) => body.child(
+                        div()
+                            .id("markdown-heading-anchor")
+                            .anchor_scroll(Some(anchor.clone()))
+                            .child(block),
+                    ),
+                    None => body.child(block),
+                };
+            }
+        }
+        if let Some((_, anchor)) = anchor {
+            anchor.scroll_to(window, cx);
+            window.on_next_frame(|window, _| window.refresh());
         }
         body
     }
+}
+
+fn heading_index(root: &markdown::mdast::Root, fragment: &str) -> Option<usize> {
+    let mut slugs = std::collections::HashSet::new();
+    root.children.iter().enumerate().find_map(|(index, node)| {
+        if !matches!(node, Node::Heading(_)) {
+            return None;
+        }
+        let base: String = node
+            .to_string()
+            .chars()
+            .flat_map(char::to_lowercase)
+            .filter_map(|c| match c {
+                ' ' => Some('-'),
+                '-' | '_' => Some(c),
+                c if c.is_alphanumeric() => Some(c),
+                _ => None,
+            })
+            .collect();
+        let mut slug = base.clone();
+        for suffix in 1.. {
+            if slugs.insert(slug.clone()) {
+                break;
+            }
+            slug = format!("{base}-{suffix}");
+        }
+        (slug == fragment).then_some(index)
+    })
 }
 
 struct MarkdownBlock<'a> {
@@ -127,7 +185,8 @@ struct MarkdownBlock<'a> {
     in_list: bool,
     quote_depth: usize,
     document: bool,
-    images: Option<ResponseImages<'a>>,
+    images: Option<&'a ResponseRenderContext<'a>>,
+    on_link_click: Option<&'a LinkHandler>,
     root: &'a markdown::mdast::Root,
 }
 
@@ -257,7 +316,7 @@ impl MarkdownBlock<'_> {
             format!("{source}\n\n{}", self.definitions)
         };
         let source = if self.images.is_some() {
-            safe_markdown(&source, true)
+            safe_markdown(&source, true, self.on_link_click.is_some())
         } else {
             source
         };
@@ -286,6 +345,7 @@ impl MarkdownBlock<'_> {
             .child(
                 TextView::markdown(SharedString::from(id.to_owned()), source, window, cx)
                     .style(style)
+                    .when_some(self.on_link_click.cloned(), TextView::on_link_click)
                     .selectable(true),
             )
     }
@@ -448,27 +508,30 @@ fn node_source<'a>(node: &Node, source: &'a str) -> Option<&'a str> {
 }
 
 // GPUI's renderer can load images and open links. Keep raw HTML and image URLs
-// inert and allow explicit navigation only to web URLs.
-fn safe_markdown(source: &str, omit_unsafe_definitions: bool) -> String {
+// inert. Workspace file links are only enabled when a scoped handler is installed.
+fn safe_markdown(source: &str, omit_unsafe_definitions: bool, workspace_links: bool) -> String {
     fn visit(
         node: &Node,
         source: &str,
         omit_unsafe_definitions: bool,
+        workspace_links: bool,
         edits: &mut Vec<(std::ops::Range<usize>, String)>,
     ) {
+        let allowed_link =
+            |url: &str| web_url(url) || (workspace_links && workspace_link_path(url).is_some());
         let replacement = match node {
             Node::Image(image) => Some(escape_markdown(&image.alt)),
             Node::ImageReference(image) => Some(escape_markdown(&image.alt)),
             Node::Html(_) => node
                 .position()
                 .map(|pos| escape_markdown(&source[pos.start.offset..pos.end.offset])),
-            Node::Link(link) if !web_url(&link.url) => node
+            Node::Link(link) if !allowed_link(&link.url) => node
                 .position()
                 .map(|pos| escape_markdown(&source[pos.start.offset..pos.end.offset])),
-            Node::Definition(link) if !web_url(&link.url) && omit_unsafe_definitions => {
+            Node::Definition(link) if !allowed_link(&link.url) && omit_unsafe_definitions => {
                 Some(String::new())
             }
-            Node::Definition(link) if !web_url(&link.url) => node
+            Node::Definition(link) if !allowed_link(&link.url) => node
                 .position()
                 .map(|pos| escape_markdown(&source[pos.start.offset..pos.end.offset])),
             _ => None,
@@ -479,7 +542,13 @@ fn safe_markdown(source: &str, omit_unsafe_definitions: bool) -> String {
             edits.push((pos.start.offset..pos.end.offset, replacement));
         } else if let Some(children) = node.children() {
             for child in children {
-                visit(child, source, omit_unsafe_definitions, edits);
+                visit(
+                    child,
+                    source,
+                    omit_unsafe_definitions,
+                    workspace_links,
+                    edits,
+                );
             }
         }
     }
@@ -488,7 +557,13 @@ fn safe_markdown(source: &str, omit_unsafe_definitions: bool) -> String {
         && let Ok(tree) = markdown::to_mdast(source, &markdown::ParseOptions::gfm())
     {
         let mut edits = Vec::new();
-        visit(&tree, source, omit_unsafe_definitions, &mut edits);
+        visit(
+            &tree,
+            source,
+            omit_unsafe_definitions,
+            workspace_links,
+            &mut edits,
+        );
         for (span, text) in edits.into_iter().rev() {
             safe.replace_range(span, &text);
         }
@@ -507,13 +582,222 @@ fn escape_markdown(text: &str) -> String {
     escaped
 }
 
+fn workspace_link_handler(response: &ResponseRenderContext<'_>) -> Option<LinkHandler> {
+    let desktop = response.desktop.clone()?;
+    let checkout = response.checkout?.to_owned();
+    Some(Arc::new(move |url, window, cx| {
+        if web_url(url) {
+            cx.open_url(url);
+            return;
+        }
+        let Some(path) = workspace_link_path(url) else {
+            return;
+        };
+        let heading = url
+            .split_once('#')
+            .and_then(|(_, fragment)| {
+                percent_decode_str(fragment)
+                    .decode_utf8()
+                    .ok()
+                    .map(Cow::into_owned)
+            })
+            .filter(|fragment| !fragment.is_empty());
+        let _ = desktop.update(cx, |desktop, cx| {
+            let Some(thread) = desktop.current.as_ref().map(|thread| thread.id.clone()) else {
+                return;
+            };
+            if desktop.workspaces[&thread].root != checkout {
+                return;
+            }
+            let root = checkout.clone();
+            let job = cx.background_spawn(async move {
+                resolve_workspace_link(&root, &path).map(Path::to_path_buf)
+            });
+            let checkout = checkout.clone();
+            cx.spawn_in(window, async move |view, cx| {
+                let Some(relative) = job.await else {
+                    return;
+                };
+                let _ = view.update_in(cx, |desktop, window, cx| {
+                    if desktop
+                        .current
+                        .as_ref()
+                        .is_some_and(|current| current.id == thread)
+                        && desktop.workspaces[&thread].root == checkout
+                    {
+                        desktop.open_document_at_heading(
+                            Document::File(relative.into()),
+                            heading,
+                            window,
+                            cx,
+                        );
+                    }
+                });
+            })
+            .detach();
+        });
+    }))
+}
+
+fn checkout_relative<'a>(checkout: &Path, path: &'a Path) -> Result<&'a Path> {
+    if !path.is_absolute() {
+        return Ok(path.strip_prefix(".").unwrap_or(path));
+    }
+    let canonical = checkout.canonicalize()?;
+    if let Ok(relative) = path
+        .strip_prefix(checkout)
+        .or_else(|_| path.strip_prefix(&canonical))
+    {
+        return Ok(relative);
+    }
+    // Resolving a Windows UNC path can authenticate to a network share before
+    // its scope is established. Only try alternate root spellings on Unix.
+    ensure!(cfg!(unix), "Path is outside the checkout");
+    // Accept aliases of the checkout's parent directories (for example /var
+    // on macOS). The scoped reader still checks every component below the root.
+    let root = path
+        .ancestors()
+        .skip(1)
+        .find(|parent| {
+            parent.file_name() == canonical.file_name()
+                && parent
+                    .canonicalize()
+                    .is_ok_and(|parent| parent == canonical)
+        })
+        .context("Path is outside the checkout")?;
+    Ok(path.strip_prefix(root)?)
+}
+
+fn resolve_workspace_link<'a>(checkout: &Path, path: &'a Path) -> Option<&'a Path> {
+    let relative = checkout_relative(checkout, path).ok()?;
+    let file = open_workspace_file(checkout, relative).ok()?;
+    file.metadata().ok()?.is_file().then_some(relative)
+}
+
+fn workspace_link_path(value: &str) -> Option<PathBuf> {
+    let path = value.split(['?', '#']).next()?;
+    let path = path
+        .rsplit_once(':')
+        .filter(|(_, line)| !line.is_empty() && line.bytes().all(|byte| byte.is_ascii_digit()))
+        .map_or(path, |(path, _)| path);
+    let path = percent_decode_str(path).decode_utf8().ok()?;
+    if path.starts_with("//") || path.contains([':', '\\', '\0']) {
+        return None;
+    }
+    let path = PathBuf::from(path.as_ref());
+    if path.file_name().is_none()
+        || path.components().any(|component| {
+            matches!(component, Component::ParentDir | Component::Prefix(_))
+                || matches!(component, Component::Normal(name) if name.eq_ignore_ascii_case(".git"))
+        })
+    {
+        return None;
+    }
+    Some(path)
+}
+
 fn web_url(value: &str) -> bool {
     url::Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{node_source, standalone_source};
+    use super::{
+        heading_index, node_source, resolve_workspace_link, safe_markdown, standalone_source,
+        workspace_link_path,
+    };
+    use markdown::{ParseOptions, mdast::Node};
+    use std::path::Path;
+
+    #[test]
+    fn response_markdown_preserves_workspace_links() {
+        let source = concat!(
+            "Added [Release Please](/checkout/.github/workflows/release-please.yml) ",
+            "and a [changelog][changes]. [Guide](</checkout/docs/Release Guide.md#publish>)\n\n",
+            "[changes]: /checkout/CHANGELOG.md:12",
+        );
+        let sanitized = safe_markdown(source, true, true);
+        let tree = markdown::to_mdast(&sanitized, &ParseOptions::gfm()).unwrap();
+        let paragraph = &tree.children().unwrap()[0];
+        let children = paragraph.children().unwrap();
+        assert!(
+            matches!(&children[1], Node::Link(link) if link.url.ends_with("release-please.yml"))
+        );
+        assert!(matches!(&children[3], Node::LinkReference(link) if link.identifier == "changes"));
+        assert!(
+            matches!(&children[5], Node::Link(link) if link.url.ends_with("Release Guide.md#publish"))
+        );
+        let Node::Definition(definition) = &tree.children().unwrap()[1] else {
+            panic!("expected the workspace link definition");
+        };
+        assert_eq!(
+            workspace_link_path(&definition.url).as_deref(),
+            Some(Path::new("/checkout/CHANGELOG.md"))
+        );
+        assert_eq!(
+            workspace_link_path("./docs/Release%20Guide.md#publish").as_deref(),
+            Some(Path::new("./docs/Release Guide.md"))
+        );
+        assert_ne!(safe_markdown(source, true, false), sanitized);
+    }
+
+    #[test]
+    fn response_markdown_keeps_unsafe_destinations_inert() {
+        for target in [
+            "javascript:alert(1)",
+            "file:///etc/hosts",
+            "//host/share",
+            "docs/%2e%2e/secret",
+            ".git/config",
+        ] {
+            let source = format!("[open](<{target}>)");
+            let sanitized = safe_markdown(&source, true, true);
+            let tree = markdown::to_mdast(&sanitized, &ParseOptions::gfm()).unwrap();
+            let children = tree.children().unwrap()[0].children().unwrap();
+            assert!(children.iter().all(|node| matches!(node, Node::Text(_))));
+        }
+        let web = "[release](https://example.com/release)";
+        assert_eq!(safe_markdown(web, true, true), web);
+    }
+
+    #[test]
+    fn heading_fragments_match_formatted_and_duplicate_headings() {
+        let Node::Root(root) = markdown::to_mdast(
+            "# Release guide\n\n## Publish the `Rust` crate!\n\n## Publish the Rust crate",
+            &ParseOptions::gfm(),
+        )
+        .unwrap() else {
+            panic!("expected a Markdown root");
+        };
+        assert_eq!(heading_index(&root, "publish-the-rust-crate"), Some(1));
+        assert_eq!(heading_index(&root, "publish-the-rust-crate-1"), Some(2));
+        assert_eq!(heading_index(&root, "absent"), None);
+    }
+
+    #[test]
+    fn workspace_links_resolve_only_to_regular_checkout_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        let file = checkout.join("README.md");
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&file, "example").unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+
+        assert_eq!(
+            resolve_workspace_link(&checkout, &file),
+            Some(Path::new("README.md"))
+        );
+        assert!(resolve_workspace_link(&checkout, &outside).is_none());
+        assert!(resolve_workspace_link(&checkout, Path::new("missing.md")).is_none());
+
+        #[cfg(unix)]
+        {
+            let alias = checkout.join("alias.md");
+            std::os::unix::fs::symlink(outside, &alias).unwrap();
+            assert!(resolve_workspace_link(&checkout, &alias).is_none());
+        }
+    }
 
     #[test]
     fn standalone_list_blocks_keep_quotes_and_code_indentation() {

@@ -1,4 +1,4 @@
-use super::{InlineImage, ResponseImages};
+use super::{InlineImage, ResponseRenderContext, checkout_relative};
 use crate::conversation::{
     attachments::image_preview, document_tabs::open_workspace_file, history_at_bottom,
     transcript::transcript_muted,
@@ -86,35 +86,6 @@ impl Source {
     }
 }
 
-fn checkout_relative<'a>(checkout: &Path, path: &'a Path) -> Result<&'a Path> {
-    if !path.is_absolute() {
-        return Ok(path.strip_prefix(".").unwrap_or(path));
-    }
-    let canonical = checkout.canonicalize()?;
-    if let Ok(relative) = path
-        .strip_prefix(checkout)
-        .or_else(|_| path.strip_prefix(&canonical))
-    {
-        return Ok(relative);
-    }
-    // Resolving a Windows UNC path can authenticate to a network share before
-    // its scope is established. Only try alternate root spellings on Unix.
-    ensure!(cfg!(unix), "Image is outside the checkout");
-    // Accept aliases of the checkout's parent directories (for example /var
-    // on macOS). The scoped reader still checks every component below the root.
-    let root = path
-        .ancestors()
-        .skip(1)
-        .find(|parent| {
-            parent.file_name() == canonical.file_name()
-                && parent
-                    .canonicalize()
-                    .is_ok_and(|parent| parent == canonical)
-        })
-        .context("Image is outside the checkout")?;
-    Ok(path.strip_prefix(root)?)
-}
-
 async fn download(url: &Url) -> Result<Vec<u8>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -170,7 +141,7 @@ pub(super) fn render(
         alt,
         link,
     }: InlineImage<'_>,
-    images: ResponseImages<'_>,
+    images: &ResponseRenderContext<'_>,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
