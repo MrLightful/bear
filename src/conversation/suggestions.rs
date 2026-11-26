@@ -282,8 +282,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         let Some(file) = FileMatch::new(path.to_path_buf()) else {
-            self.error = Some("Could not attach this path to the message.".into());
-            cx.notify();
+            self.report_error("Could not attach this path to the message.".into(), cx);
             return;
         };
         self.prompt.update(cx, |input, cx| {

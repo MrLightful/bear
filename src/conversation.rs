@@ -72,6 +72,23 @@ fn history_at_bottom(scroll: &ScrollHandle) -> bool {
     scroll.max_offset().height + scroll.offset().y <= px(2.)
 }
 
+pub(crate) fn conversation_error_response(message: &str, cx: &App) -> Div {
+    control!(
+        format!("error/{message}"),
+        div()
+            .min_w_0()
+            .text_sm()
+            .text_color(cx.theme().danger)
+            .child(message.to_owned()),
+    )
+}
+
+struct ConversationError {
+    after: Option<huggler::MessageId>,
+    message: String,
+    unsent_message: Option<String>,
+}
+
 struct Workspace {
     root: PathBuf,
     main_worktree: Option<PathBuf>,
@@ -82,6 +99,7 @@ struct Workspace {
     traces: traces::Traces,
     draft: Entity<InputState>,
     attachments: Attachments,
+    errors: Vec<ConversationError>,
     questions: HashMap<huggler::RequestId, Entity<Questions>>,
     #[cfg(target_os = "macos")]
     terminal: terminal_pane::TerminalPane,
@@ -441,7 +459,45 @@ impl Desktop {
     }
 
     fn report(&mut self, result: huggler::Result<()>, cx: &mut Context<Self>) {
-        self.error = result.err().map(|error| error.to_string());
+        if let Err(error) = result {
+            self.report_error(error.to_string(), cx);
+        }
+        cx.notify();
+    }
+
+    fn report_error(&mut self, message: String, cx: &mut Context<Self>) {
+        let thread = self.current.as_ref().map(|thread| thread.id.clone());
+        self.record_error(thread.as_ref(), message, None, cx);
+    }
+
+    fn record_error(
+        &mut self,
+        thread: Option<&ThreadId>,
+        message: String,
+        unsent_message: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = thread.and_then(|id| self.workspaces.get_mut(id)) {
+            let after = self
+                .current
+                .as_ref()
+                .filter(|current| Some(&current.id) == thread && self.before.is_none())
+                .and_then(|current| current.history.messages.last())
+                .map(|item| item.message.id.clone());
+            workspace.errors.push(ConversationError {
+                after,
+                message,
+                unsent_message,
+            });
+            if self.current.as_ref().map(|thread| &thread.id) == thread
+                && self.before.is_none()
+                && history_at_bottom(&self.history_scroll)
+            {
+                self.history_scroll.scroll_to_bottom();
+            }
+        } else if thread.is_none() {
+            self.error = Some(message);
+        }
         cx.notify();
     }
 
@@ -696,6 +752,7 @@ impl Desktop {
                     traces: traces::Traces::default(),
                     draft,
                     attachments: Attachments::default(),
+                    errors: Vec::new(),
                     questions: HashMap::new(),
                     #[cfg(target_os = "macos")]
                     terminal: terminal_pane::TerminalPane::default(),
@@ -720,7 +777,9 @@ impl Desktop {
                 && (thread.history.messages.last().map(|m| &m.message.id)
                     != old.history.messages.last().map(|m| &m.message.id)
                     || thread.streaming_text != old.streaming_text
-                    || thread.activity != old.activity)
+                    || thread.activity != old.activity
+                    || thread.latest_run.as_ref().and_then(|run| run.error.as_ref())
+                        != old.latest_run.as_ref().and_then(|run| run.error.as_ref()))
             {
                 self.history_scroll.scroll_to_bottom();
             }
@@ -1149,31 +1208,37 @@ impl Desktop {
                                 && (v.backlog.open == saved_draft.is_some())
                                 && (saved_draft.is_none() || sent.is_ok())
                             {
-                                v.select(id, w, cx)?;
+                                v.select(id.clone(), w, cx)?;
                             }
                             sent
                         })();
+                        let target = v.workspaces.contains_key(&id).then_some(&id);
                         if let (Some(draft), Err(error)) = (failed_draft, &result) {
                             v.backlog.errors.insert(
                                 draft,
                                 DraftError::Delivery(format!("Could not send draft. {error}")),
                             );
-                        } else {
-                            v.report(result, cx);
+                        } else if let Err(error) = result {
+                            v.record_error(target, error.to_string(), None, cx);
                         }
                         if let Some(Err(error)) = cleanup {
-                            v.error = Some(format!(
-                                "Message sent. Could not remove its Backlog draft. {error}"
-                            ));
-                        } else if v.error.is_none() {
-                            v.error = saved
-                                .and_then(Result::err)
-                                .map(|error| format!("{error:#}"))
-                                .or_else(|| {
-                                    history_error.map(|error| {
-                                        format!("Could not save worktree setup history. {error:#}")
-                                    })
-                                });
+                            v.record_error(
+                                target,
+                                format!("Message sent. Could not remove its Backlog draft. {error}"),
+                                None,
+                                cx,
+                            );
+                        }
+                        if let Some(Err(error)) = saved {
+                            v.record_error(target, format!("{error:#}"), None, cx);
+                        }
+                        if let Some(error) = history_error {
+                            v.record_error(
+                                target,
+                                format!("Could not save worktree setup history. {error:#}"),
+                                None,
+                                cx,
+                            );
                         }
                     }
                     Err(error) => {
@@ -1258,7 +1323,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         let runtime = self.runtime.clone();
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn_in(window, async move |view, cx| {
             let mut cursor = receipt.event_sequences.last().copied().unwrap_or_default();
             let thread = receipt.thread_id;
             let command = receipt.command_id;
@@ -1282,22 +1347,8 @@ impl Desktop {
                     Err(error) => break format!("Could not check follow-up delivery. {error}"),
                 }
             };
-            let _ = cx.update(|window, cx| {
-                use gpui_component::{WindowExt, notification::Notification};
-                window.push_notification(
-                    Notification::warning(result)
-                        .autohide(false)
-                        .action(move |_, _, _| {
-                            let text = text.clone();
-                            Button::new("copy-follow-up")
-                                .small()
-                                .label("Copy message")
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
-                                })
-                        }),
-                    cx,
-                );
+            let _ = view.update_in(cx, |view, _, cx| {
+                view.record_error(Some(&thread), result, Some(text), cx);
             });
         })
         .detach();
@@ -1551,6 +1602,9 @@ impl Desktop {
                 .gap_2()
                 .child(heading(title).text_xl().mb_1())
                 .child(h_flex().child(self.project_control(window, cx)))
+                .when_some(self.error.as_ref(), |body, error| {
+                    body.child(conversation_error_response(error, cx))
+                })
                 .child(composer)
                 .when(!checkout_empty, |body| {
                     body.child(self.launch_checkout_controls(cx))
@@ -1665,6 +1719,9 @@ impl Desktop {
                     .label("Back to message")
                     .on_click(cx.listener(|v, _, w, cx| v.new_conversation(false, w, cx)))
             )))
+            .when_some(self.error.as_ref(), |body, error| {
+                body.child(conversation_error_response(error, cx))
+            })
             .child(launcher)
             .when(!checkout_empty, |body| {
                 body.child(self.launch_checkout_controls(cx))
@@ -1786,6 +1843,8 @@ impl Desktop {
             && thread.history.messages.is_empty()
             && self.before.is_none()
             && pending == 0
+            && workspace.errors.is_empty()
+            && !self.checkout_unavailable
             && !busy;
         let transcript_width = Self::transcript_width(width);
         let width = width.min(px(800.));
@@ -1857,25 +1916,6 @@ impl Desktop {
             Self::composer_surface(cx)
                 .on_drop(cx.listener(Self::drop_attachments))
                 .mx_4().mb_2()
-                .when(self.checkout_unavailable, |composer| {
-                    composer
-                        .child(control!(
-                            "Checkout unavailable",
-                            div().text_sm().child(format!(
-                                "Restore {} to continue this conversation, or start one in another checkout.",
-                                workspace.root.display()
-                            ))
-                        ))
-                        .child(control!(
-                            "Choose another checkout",
-                            Button::new("replace-checkout")
-                                .label("Choose another checkout")
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.new_conversation(false, window, cx);
-                                    view.open_project_picker(window, cx);
-                                }))
-                        ))
-                })
                 .when_some(
                     last_run.and_then(|run| run.prompt_suggestion.clone()),
                     |row, hint| {
@@ -1894,9 +1934,6 @@ impl Desktop {
                         ))
                     },
                 )
-                .when_some(last_run.filter(|_| !self.checkout_unavailable).and_then(|r| r.error.clone()), |area, error| {
-                    area.child(div().id("run-error").max_h(px(64.)).overflow_y_scroll().text_sm().text_color(cx.theme().danger).child(error))
-                })
                 .child(message_input)
                 .children(self.attachment_list(attachments, cx))
                 .when(thread.queued_count > 0, |composer| {
@@ -2265,21 +2302,7 @@ impl Render for Desktop {
                                 cx,
                             ),
                         }
-                    })
-                    .when_some(
-                        self.error.as_ref().filter(|_| !self.show_settings),
-                        |view, error| {
-                            view.child(control!(
-                                format!("error/{error}"),
-                                div()
-                                    .px_4()
-                                    .py_2()
-                                    .text_sm()
-                                    .text_color(cx.theme().danger)
-                                    .child(error.clone()),
-                            ))
-                        },
-                    ),
+                    }),
             )
             .when(left == 1., |layout| {
                 layout.child(SidebarEdge::Left.handle(

@@ -76,11 +76,17 @@ def main():
                            (str(i), thread, i + 1))
                 db.execute("INSERT INTO message(id,run_id,role,text) VALUES(?,?,'assistant',?)",
                            (str(i), str(i), long_message if i == 998 else f"Answer {i}"))
+            db.execute("UPDATE run SET status='failed', error=? WHERE id='999'",
+                       ("Provider could not finish this turn.",))
+        error_response = "error/Provider could not finish this turn."
         steps = [
+            {"see": error_response},
             {"see": "Codex/Answer 999"}, {"absent": "Codex/Answer 967"}, {"see": "active-turn/32"},
             {"click": "Older"}, {"see": "Codex/Answer 967"}, {"absent": "Codex/Answer 999"},
+            {"absent": error_response},
             {"see": "active-turn/1"}, {"see": "Newest"}, {"click": "Scroll to end"},
-            {"see": "Codex/Answer 999"}, {"see": "active-turn/32"}, {"absent": "Scroll to end"},
+            {"see": "Codex/Answer 999"}, {"see": error_response},
+            {"see": "active-turn/32"}, {"absent": "Scroll to end"},
             {"absent": "Search messages"}, {"click": "expand/998"}, {"see": "Codex/" + long_message},
         ]
         run_window(executable, state, steps, os.environ)
