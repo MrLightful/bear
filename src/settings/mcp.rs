@@ -393,11 +393,6 @@ impl Settings {
             Some(McpConnection::Stdio { .. }) => "Stdio",
             None => "Custom",
         };
-        let state = if server.enabled {
-            "Enabled"
-        } else {
-            "Disabled"
-        };
         let toggle_name = name.clone();
         let edit_name = name.clone();
         let remove_name = name.clone();
@@ -418,7 +413,14 @@ impl Settings {
                             .flex_1()
                             .min_w_0()
                             .child(control!(
-                                format!("MCP settings/{name}/{state}"),
+                                format!(
+                                    "MCP settings/{name}/{state}",
+                                    state = if server.enabled {
+                                        "Enabled"
+                                    } else {
+                                        "Disabled"
+                                    }
+                                ),
                                 label(name.clone())
                                     .truncate()
                                     .id(SharedString::from(format!("mcp-name/{name}")))
