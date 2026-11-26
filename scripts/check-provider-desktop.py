@@ -270,6 +270,9 @@ def check_mcp_status(executable, tmp, env):
         {"above": ["MCP servers", trigger]},
         {"key": "tab"}, "release_enter", {"see": "Checking MCP servers…"},
         {"key": "escape"}, {"absent": "MCP servers"},
+        {"click": trigger}, {"click": "Open MCP settings"},
+        {"see": "Add MCP server"}, {"absent": "Refresh MCP status"},
+        {"click": "Back to workspace"},
         {"click": trigger}, {"click": "Authenticate MCP/Notes"},
         {"file_text": [str(state / "mcp-login.json"), json.dumps(["mcp", "login", "Notes"])]},
     ], env)
