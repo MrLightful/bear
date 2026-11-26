@@ -299,8 +299,13 @@ impl Desktop {
                                 )
                         ),
                 )
-                .on_click(cx.listener(move |view, _, window, cx| {
-                    view.open_document(document.clone(), window, cx);
+                .on_click(cx.listener(move |view, event: &ClickEvent, window, cx| {
+                    view.open_sidebar_document(
+                        document.clone(),
+                        event.click_count() == 2,
+                        window,
+                        cx,
+                    );
                 })),
         )
         .h(ROW_HEIGHT)

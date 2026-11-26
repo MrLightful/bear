@@ -29,7 +29,7 @@ pub(super) struct FileTree {
 }
 
 pub(super) enum FileAction {
-    Open(Arc<Path>),
+    Open { path: Arc<Path>, keep_open: bool },
     AttachFile(Arc<Path>),
     AttachReference(Arc<Path>),
     OpenIn(OpenIn, Arc<Path>),
@@ -247,11 +247,14 @@ impl Row {
             })
             .on_click(cx.listener({
                 let path = path.clone();
-                move |tree, _, _, cx| {
+                move |tree, event: &ClickEvent, _, cx| {
                     if is_directory {
                         tree.toggle(&path, cx);
                     } else {
-                        cx.emit(FileAction::Open(path.clone()));
+                        cx.emit(FileAction::Open {
+                            path: path.clone(),
+                            keep_open: event.click_count() == 2,
+                        });
                     }
                 }
             }));

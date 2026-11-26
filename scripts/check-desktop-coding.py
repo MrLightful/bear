@@ -241,6 +241,14 @@ def check(binary):
             {"click": f"Changed/{name}"}, {"see": f"Diff tab/All changes/{name}"},
             {"see": f"Document/{name}"}, {"contains": "+later edit"},
             {"click": f"Changed/{other_name}"}, {"see": f"Document/{other_name}"},
+            {"absent": f"Diff tab/All changes/{name}"}, {"contains": "+keep this"},
+            {"click": "All files tab"}, {"click": f"Workspace file/{name}"},
+            {"see": f"File tab/{name}"}, {"absent": f"Diff tab/All changes/{other_name}"},
+            {"click": "Changes tab"}, {"click": f"Changed/{name}"},
+            {"see": f"Diff tab/All changes/{name}"}, {"absent": f"File tab/{name}"},
+            {"click": f"Keep open Diff tab/All changes/{name}"},
+            {"absent": f"Keep open Diff tab/All changes/{name}"},
+            {"click": f"Changed/{other_name}"}, {"see": f"Document/{other_name}"},
             {"contains": "+keep this"}, {"key": "cmd-w"},
             {"absent": f"Diff tab/All changes/{other_name}"}, {"see": f"Document/{name}"},
             {"key": "cmd-l"}, {"see": "Message"}, {"see": f"Diff tab/All changes/{name}"},
@@ -405,6 +413,7 @@ def check_editor_reload(binary):
         subprocess.run(["git", "init", "-qb", "main", checkout], check=True)
         path = checkout / "notes.txt"
         path.write_text("Original notes\n")
+        (checkout / "other.txt").write_text("Another file\n")
         env = isolated_env(root)
         env["HUGGLER_CODEX"] = str(ROOT / "tests/fixtures/desktop-coding-peer.py")
         open_notes = {"click": "Workspace file/notes.txt"}
@@ -414,7 +423,12 @@ def check_editor_reload(binary):
             {"resize": [1120, 740]}, {"click": "All files tab"},
             open_notes, raw, {"see": "Raw editor"},
             {"key": "cmd-,"}, {"click": "Back to workspace"}, {"see": "Raw editor"},
-            {"key": "cmd-a"}, {"type": "First edit"}, {"key": "cmd-s"},
+            {"key": "cmd-a"}, {"type": "First edit"},
+            {"absent": "Keep open File tab/notes.txt"},
+            {"click": "Workspace file/other.txt"}, {"see": "Document text/Another file\n"},
+            {"see": "File tab/notes.txt"},
+            {"click": "Close File tab/other.txt"}, {"see": "Raw editor"},
+            {"click": "Copy document"}, {"clipboard_text": "First edit"}, {"key": "cmd-s"},
             {"file_size": [str(path), len("First edit")]},
             {"click": "Document mode/Preview"}, {"see": "Document text/First edit"},
             *launch_thread(checkout, "Second editor", current=True),
@@ -441,6 +455,7 @@ def check_transcript(binary):
         state = root / "state"
         subprocess.run(["git", "init", "-q", checkout], check=True)
         env = isolated_env(root)
+        (checkout / "notes.txt").write_text("Fixture notes\n")
         env["HUGGLER_CODEX"] = str(ROOT / "tests/fixtures/desktop-transcript-peer.py")
         run_window(binary, state, [
             *launch_thread(checkout, "Transcript review"),
@@ -477,6 +492,11 @@ def check_transcript(binary):
             {"click": "Document mode/Raw"}, {"absent": "Trace field/query"},
             {"contains": "Trace Input/"}, {"contains": "Trace Result/"},
             {"click": "Document mode/Fields"}, {"see": "Trace field/query"},
+            {"click": "All files tab"}, {"click": "Workspace file/notes.txt"},
+            {"absent": "Trace tab/docs / lookup"},
+            {"click": "Traces tab"}, {"click": "Trace/docs / lookup"},
+            {"see": "Trace field/query"}, {"absent": "File tab/notes.txt"},
+            {"click": "Keep open Trace tab/docs / lookup"},
             {"click": "Trace filter/Std"}, {"absent": "Trace/docs / lookup"},
             {"click": "Trace/cargo test --locked --test context"},
             {"max_height": ["Tool trace/cargo test --locked --test context", 24]},
