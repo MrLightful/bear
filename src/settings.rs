@@ -182,6 +182,7 @@ pub enum SettingsEvent {
 pub(crate) enum SettingsTarget<'a> {
     Overview,
     Provider(&'a ProviderInstanceId),
+    ProviderMcp(&'a ProviderInstanceId),
     DefaultModels,
     #[cfg(target_os = "macos")]
     ProjectActions(PathBuf),
@@ -325,6 +326,9 @@ impl Settings {
             }
             SettingsTarget::DefaultModels => self.show_page(Page::DefaultModels, window, cx),
             SettingsTarget::Provider(instance) => self.open_provider_settings(instance, window, cx),
+            SettingsTarget::ProviderMcp(instance) => {
+                self.open_provider_mcp_settings(instance, window, cx);
+            }
             #[cfg(target_os = "macos")]
             SettingsTarget::ProjectActions(root) => self.open_project_actions(root, window, cx),
         }
