@@ -1,5 +1,6 @@
 mod diff;
 mod editor;
+mod media;
 mod trace;
 
 use super::{markdown_view::Markdown, traces, *};
@@ -29,7 +30,6 @@ use std::{
 
 pub(crate) const DOCUMENT_CONTEXT: &str = "HugglerDocument";
 const TEXT_LIMIT: usize = 128 * 1024;
-const IMAGE_LIMIT: usize = 8 * 1024 * 1024;
 const TAB_LABEL_WIDTH: Pixels = px(144.);
 const COPY_FEEDBACK: Duration = Duration::from_secs(2);
 
@@ -68,12 +68,14 @@ impl Document {
         }
     }
 
-    fn read(&self, root: &Path, refresh: bool) -> Result<Loaded> {
-        let row = match self {
-            Self::File(path) => return Ok(Loaded::file(read_file(root, path)?)),
-            Self::Diff(row) => row,
-            Self::Trace(_) => unreachable!("traces are read from the conversation"),
-        };
+    fn initial_mode(&self) -> DocumentMode {
+        match self {
+            Self::Diff(_) => DocumentMode::Unified,
+            Self::File(_) | Self::Trace(_) => DocumentMode::Preview,
+        }
+    }
+
+    fn read_diff(root: &Path, row: &ReviewRow, refresh: bool) -> Result<LoadedDiff> {
         let row = if refresh {
             let snapshot = git::changed_files(root, row.scope)?;
             snapshot
@@ -90,7 +92,11 @@ impl Document {
             Some(row.clone())
         };
         let Some(row) = row else {
-            return Ok(Loaded::file(Preview::Notice(NO_DIFF)));
+            return Ok(LoadedDiff {
+                patch: Preview::Notice(NO_DIFF),
+                review: None,
+                revert: None,
+            });
         };
         let revert = row
             .file
@@ -99,13 +105,13 @@ impl Document {
             .flatten()
             .map(|target| Arc::from([target]));
         let bytes = git::file_patch(root, &row.base, &row.head, &row.file, TEXT_LIMIT + 1)?;
-        let preview = if bytes.is_empty() {
+        let patch = if bytes.is_empty() {
             Preview::Notice(NO_DIFF)
         } else {
             Preview::text(bytes, Some(&row.file.path), false)
         };
-        Ok(Loaded {
-            preview,
+        Ok(LoadedDiff {
+            patch,
             review: Some(row),
             revert,
         })
@@ -129,6 +135,10 @@ impl DocumentTabs {
 
     pub(super) fn active(&self) -> Option<&DocumentTab> {
         self.active.and_then(|index| self.tabs.get(index))
+    }
+
+    fn active_mut(&mut self, id: usize) -> Option<&mut DocumentTab> {
+        self.tabs.get_mut(self.active?).filter(|tab| tab.id == id)
     }
 
     pub(super) fn is_active(&self, document: &Document) -> bool {
@@ -171,13 +181,16 @@ pub(super) struct DocumentTab {
     preview: bool,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    patch_scroll: ScrollHandle,
     pending_heading: RefCell<Option<String>>,
     diff_scroll: UniformListScrollHandle,
     mode: DocumentMode,
     copied_at: Option<Instant>,
-    loaded: Option<Result<Loaded>>,
+    file_preview: Option<Result<Preview>>,
+    diff: Option<Result<LoadedDiff>>,
     revert_error: Option<String>,
-    load: Option<Task<()>>,
+    file_load: Option<Task<()>>,
+    diff_load: Option<Task<()>>,
     trace: Option<TraceContent>,
 }
 
@@ -187,28 +200,18 @@ struct TraceContent {
     _reader: Option<Task<()>>,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum DocumentMode {
-    #[default]
     Preview,
+    Unified,
     Patch,
     Raw,
 }
 
-struct Loaded {
-    preview: Preview,
+struct LoadedDiff {
+    patch: Preview,
     review: Option<ReviewRow>,
     revert: Option<Arc<[PreparedRevert]>>,
-}
-
-impl Loaded {
-    fn file(preview: Preview) -> Self {
-        Self {
-            preview,
-            review: None,
-            revert: None,
-        }
-    }
 }
 
 enum Formatted {
@@ -225,6 +228,11 @@ enum Preview {
     Image {
         thumbnail: Arc<RenderImage>,
         source: Arc<Image>,
+    },
+    #[cfg(target_os = "macos")]
+    Pdf {
+        pages: Vec<Option<Arc<RenderImage>>>,
+        total: usize,
     },
     Notice(&'static str),
 }
@@ -275,6 +283,8 @@ impl Preview {
                 Some((tooltip, CopyContent::Text(text.clone())))
             }
             Self::Image { source, .. } => Some(("Copy image", CopyContent::Image(source.clone()))),
+            #[cfg(target_os = "macos")]
+            Self::Pdf { .. } => None,
             Self::Notice(_) => None,
         }
     }
@@ -331,38 +341,16 @@ fn read_file(root: &Path, path: &Path) -> Result<Preview> {
     (&mut file)
         .take((TEXT_LIMIT + 1) as u64)
         .read_to_end(&mut bytes)?;
-    let format = match image::guess_format(&bytes) {
-        Ok(image::ImageFormat::Png) => Some(ImageFormat::Png),
-        Ok(image::ImageFormat::Jpeg) => Some(ImageFormat::Jpeg),
-        Ok(image::ImageFormat::WebP) => Some(ImageFormat::Webp),
-        Ok(image::ImageFormat::Gif) => Some(ImageFormat::Gif),
-        _ => None,
-    };
-    if let Some(format) = format {
-        file.take((IMAGE_LIMIT + 1 - bytes.len()) as u64)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > IMAGE_LIMIT {
-            return Ok(Preview::Notice("This image is too large to preview."));
-        }
-        return Ok(attachments::image_preview(&bytes, true).map_or(
-            Preview::Notice("Could not preview this image."),
-            |thumbnail| Preview::Image {
-                thumbnail,
-                source: Arc::new(Image::from_bytes(format, bytes)),
-            },
-        ));
-    }
     if bytes.is_empty() {
         return Ok(Preview::Notice("This file is empty."));
     }
-    let markdown = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .is_some_and(|ext| {
-            ["md", "markdown", "mdx"]
-                .iter()
-                .any(|name| ext.eq_ignore_ascii_case(name))
-        });
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if let Some(media) = media::Media::detect(&bytes, extension) {
+        return Ok(media.read(file, bytes)?);
+    }
+    let markdown = ["md", "markdown", "mdx"]
+        .iter()
+        .any(|name| extension.eq_ignore_ascii_case(name));
     Ok(Preview::text(bytes, None, markdown))
 }
 
@@ -370,7 +358,7 @@ impl Desktop {
     fn active_document_mut(&mut self, id: usize) -> Option<&mut DocumentTab> {
         let thread = self.current.as_ref()?;
         let tabs = &mut self.workspaces.get_mut(&thread.id)?.documents;
-        tabs.tabs.get_mut(tabs.active?).filter(|tab| tab.id == id)
+        tabs.active_mut(id)
     }
 
     pub(super) fn return_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -438,13 +426,16 @@ impl Desktop {
                     preview,
                     focus: cx.focus_handle().tab_stop(true),
                     scroll: ScrollHandle::new(),
+                    patch_scroll: ScrollHandle::new(),
                     diff_scroll: UniformListScrollHandle::new(),
                     pending_heading: RefCell::default(),
-                    mode: DocumentMode::default(),
+                    mode: document.initial_mode(),
                     copied_at: None,
-                    loaded: None,
+                    file_preview: None,
+                    diff: None,
                     revert_error: None,
-                    load: None,
+                    file_load: None,
+                    diff_load: None,
                     trace: None,
                 };
                 tabs.next_id += 1;
@@ -915,20 +906,53 @@ impl DocumentTab {
     }
 
     fn load(&mut self, thread: &ThreadId, root: &Path, refresh: bool, cx: &mut Context<Desktop>) {
-        let document = self.document.clone();
+        self.copied_at = None;
+        self.file_preview = None;
+        self.file_load = None;
+        if self.mode == DocumentMode::Preview {
+            self.load_file_preview(thread, root, cx);
+        }
+        let Document::Diff(row) = &self.document else {
+            return;
+        };
+        let row = row.clone();
         let thread = thread.clone();
         let root = root.to_path_buf();
         let id = self.id;
-        let job = cx.background_spawn(async move { document.read(&root, refresh) });
-        self.copied_at = None;
-        self.load = Some(cx.spawn(async move |view, cx| {
+        let job = cx.background_spawn(async move { Document::read_diff(&root, &row, refresh) });
+        self.diff_load = Some(cx.spawn(async move |view, cx| {
             let result = job.await;
             let _ = view.update(cx, |view, cx| {
                 if let Some(tab) = view.workspaces.get_mut(&thread).and_then(|workspace| {
                     workspace.documents.tabs.iter_mut().find(|tab| tab.id == id)
                 }) {
-                    tab.loaded = Some(result);
-                    tab.load = None;
+                    tab.diff = Some(result);
+                    tab.diff_load = None;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn load_file_preview(&mut self, thread: &ThreadId, root: &Path, cx: &mut Context<Desktop>) {
+        if self.file_preview.is_some() || self.file_load.is_some() {
+            return;
+        }
+        let Some(path) = self.document.path().map(Path::to_path_buf) else {
+            return;
+        };
+        let thread = thread.clone();
+        let root = root.to_path_buf();
+        let id = self.id;
+        let job = cx.background_spawn(async move { read_file(&root, &path) });
+        self.file_load = Some(cx.spawn(async move |view, cx| {
+            let result = job.await;
+            let _ = view.update(cx, |view, cx| {
+                if let Some(tab) = view.workspaces.get_mut(&thread).and_then(|workspace| {
+                    workspace.documents.tabs.iter_mut().find(|tab| tab.id == id)
+                }) {
+                    tab.file_preview = Some(result);
+                    tab.file_load = None;
                     cx.notify();
                 }
             });
@@ -950,15 +974,20 @@ impl DocumentTab {
         let scope = self.document.comparison();
         let theme = cx.theme();
         let (border, muted, foreground) = (theme.border, theme.muted_foreground, theme.foreground);
-        let loaded = match &self.loaded {
-            Some(Ok(loaded)) => Some(loaded),
-            _ => None,
+        let diff = self.diff.as_ref();
+        let review = diff.and_then(|diff| diff.as_ref().ok());
+        let viewing_diff = matches!(self.mode, DocumentMode::Unified | DocumentMode::Patch);
+        let content_preview = if viewing_diff {
+            diff.map(|diff| diff.as_ref().map(|diff| &diff.patch))
+        } else {
+            self.file_preview.as_ref().map(Result::as_ref)
         };
-        let preview = loaded.map(|loaded| &loaded.preview);
+        let preview = content_preview.and_then(Result::ok);
         let modes: &[(DocumentMode, &str)] = if scope.is_some() {
             &[
-                (DocumentMode::Preview, "Unified"),
+                (DocumentMode::Unified, "Unified"),
                 (DocumentMode::Patch, "Patch"),
+                (DocumentMode::Preview, "Preview"),
                 (DocumentMode::Raw, "Raw"),
             ]
         } else {
@@ -973,9 +1002,9 @@ impl DocumentTab {
         let copy = if raw {
             draft.map(|draft| ("Copy file", CopyContent::Draft(draft.input.clone())))
         } else {
-            preview.and_then(|preview| preview.copy_content(scope.is_some()))
+            preview.and_then(|preview| preview.copy_content(viewing_diff))
         };
-        let revert = loaded.and_then(|loaded| loaded.review.as_ref().zip(loaded.revert.as_ref()));
+        let revert = review.and_then(|diff| diff.review.as_ref().zip(diff.revert.as_ref()));
         let truncated = matches!(
             preview,
             Some(Preview::Text {
@@ -991,9 +1020,9 @@ impl DocumentTab {
                 )
                 .into_any_element()
         } else {
-            match &self.loaded {
+            match content_preview {
                 None => hint(
-                    if scope.is_some() {
+                    if viewing_diff {
                         "Reading diff…"
                     } else {
                         "Reading file…"
@@ -1005,7 +1034,7 @@ impl DocumentTab {
                 Some(Err(error)) => hint(format!("Could not open {path_label}. {error:#}"), cx)
                     .p_4()
                     .into_any_element(),
-                Some(Ok(loaded)) => self.render_preview(&loaded.preview, window, cx),
+                Some(Ok(preview)) => self.render_preview(preview, window, cx),
             }
         };
         v_flex()
@@ -1093,7 +1122,7 @@ impl DocumentTab {
                                         .icon(IconName::Undo2)
                                         .tooltip("Revert file")
                                         .disabled(
-                                            self.load.is_some()
+                                            self.diff_load.is_some()
                                                 || draft.is_some_and(
                                                     |draft| draft.dirty || draft.is_saving()
                                                 )
@@ -1113,6 +1142,11 @@ impl DocumentTab {
                     ),
             )
             .when_some(scope, |pane, scope| {
+                let label = if self.mode == DocumentMode::Preview {
+                    format!("{scope} · Working tree preview")
+                } else {
+                    scope.to_owned()
+                };
                 pane.child(
                     h_flex()
                         .px_3()
@@ -1120,9 +1154,9 @@ impl DocumentTab {
                         .gap_3()
                         .border_b_1()
                         .border_color(border)
-                        .child(hint(scope, cx).text_xs().flex_1())
+                        .child(hint(label, cx).text_xs().flex_1())
                         .when_some(
-                            loaded.and_then(|loaded| loaded.review.as_ref()),
+                            review.and_then(|diff| diff.review.as_ref()),
                             |summary, row| summary.child(line_counts(row.file.lines, cx)),
                         ),
                 )
@@ -1188,7 +1222,11 @@ impl DocumentTab {
                     IconName::Copy
                 })
                 .tooltip(tooltip)
-                .disabled(self.load.is_some())
+                .disabled(match self.mode {
+                    DocumentMode::Unified | DocumentMode::Patch => self.diff_load.is_some(),
+                    DocumentMode::Preview => self.file_load.is_some(),
+                    DocumentMode::Raw => false,
+                })
                 .on_click(cx.listener(move |desktop, _, _, cx| {
                     let Some(tab) = desktop.active_document_mut(id) else {
                         return;
@@ -1228,8 +1266,16 @@ impl DocumentTab {
                                 .selected(self.mode == mode)
                                 .when(self.mode == mode, |button| button.bg(cx.theme().background))
                                 .on_click(cx.listener(move |desktop, _, window, cx| {
-                                    if let Some(tab) = desktop.active_document_mut(id) {
+                                    if let Some(thread) = &desktop.current
+                                        && let Some(workspace) =
+                                            desktop.workspaces.get_mut(&thread.id)
+                                        && let Some(tab) = workspace.documents.active_mut(id)
+                                    {
                                         tab.mode = mode;
+                                        tab.copied_at = None;
+                                        if mode == DocumentMode::Preview {
+                                            tab.load_file_preview(&thread.id, &workspace.root, cx);
+                                        }
                                         desktop.focus_workspace(window, cx);
                                         desktop.open_active_editor(window, cx);
                                         cx.notify();
@@ -1245,13 +1291,36 @@ impl DocumentTab {
             Preview::Notice(message) => {
                 return control!(*message, hint(*message, cx).p_4()).into_any_element();
             }
-            Preview::Image { thumbnail, .. } => {
-                div().p_4().child(img(thumbnail.clone()).max_w_full())
-            }
+            Preview::Image { thumbnail, .. } => div()
+                .p_4()
+                .child(control!("Rendered image", preview_bitmap(thumbnail))),
+            #[cfg(target_os = "macos")]
+            Preview::Pdf { pages, total } => v_flex()
+                .w_full()
+                .gap_4()
+                .p_4()
+                .when(pages.len() < *total, |body| {
+                    body.child(hint(
+                        format!("Showing {} of {total} pages", pages.len()),
+                        cx,
+                    ))
+                })
+                .children(pages.iter().enumerate().map(|(index, page)| {
+                    let number = index + 1;
+                    match page {
+                        Some(page) => {
+                            control!(format!("PDF page/{number}"), preview_bitmap(page).mx_auto())
+                                .into_any_element()
+                        }
+                        None => {
+                            hint(format!("Could not render page {number}."), cx).into_any_element()
+                        }
+                    }
+                })),
             Preview::Text {
                 formatted: Some(Formatted::Diff(diff)),
                 ..
-            } if self.mode == DocumentMode::Preview => {
+            } if self.mode == DocumentMode::Unified => {
                 return Diff::render(diff, &self.diff_scroll, window, cx).into_any_element();
             }
             Preview::Text {
@@ -1270,7 +1339,7 @@ impl DocumentTab {
                     markdown.render(
                         format!("markdown-document-{}", self.id),
                         text,
-                        self.load
+                        self.file_load
                             .is_none()
                             .then(|| self.pending_heading.take())
                             .flatten()
@@ -1294,7 +1363,11 @@ impl DocumentTab {
                     StyledText::new(text.clone())
                 )),
         };
-        let scroll = &self.scroll;
+        let scroll = if self.mode == DocumentMode::Patch {
+            &self.patch_scroll
+        } else {
+            &self.scroll
+        };
         div()
             .relative()
             .size_full()
@@ -1309,6 +1382,19 @@ impl DocumentTab {
             .scrollbar(scroll, ScrollbarAxis::Both)
             .into_any_element()
     }
+}
+
+fn preview_bitmap(image: &Arc<RenderImage>) -> Div {
+    let size = image.size(0);
+    let width = size.width.0 as f32;
+    let height = size.height.0 as f32;
+    let mut frame = div()
+        .relative()
+        .w_full()
+        .max_w(px(width.min(840.)))
+        .child(img(image.clone()).absolute().size_full());
+    frame.style().aspect_ratio = Some(width / height);
+    frame
 }
 
 fn reveal_tab(reveal: &Cell<Option<usize>>, scroll: &ScrollHandle, window: &mut Window) {

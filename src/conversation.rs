@@ -12,6 +12,7 @@ mod project_actions;
 mod projects;
 mod sidebar;
 mod suggestions;
+mod svg_preview;
 #[cfg(target_os = "macos")]
 mod terminal;
 #[cfg(target_os = "macos")]
