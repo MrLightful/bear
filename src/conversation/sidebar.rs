@@ -183,6 +183,11 @@ impl Desktop {
             let rows: Vec<_> = self
                 .threads
                 .iter()
+                // Opening a conversation and queuing its first message publish
+                // separate updates. Skip the transient row without a run.
+                .filter(|thread| {
+                    thread.status.is_some() || !self.pending_first_messages.contains(&thread.id)
+                })
                 .filter_map(|thread| {
                     let (group, status) = activity(thread);
                     (section == group).then_some((thread, status))
