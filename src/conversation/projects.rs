@@ -352,13 +352,13 @@ impl Desktop {
                                 .settings
                                 .update(cx, |settings, cx| settings.save_project(root.clone(), cx))
                         {
-                            view.error = Some(format!("{error:#}"));
+                            view.report_error(format!("{error:#}"), cx);
                         } else {
                             view.choose_checkout(root, window, cx);
                         }
                     }
                     Ok(None) => (),
-                    Err(error) => view.error = Some(format!("{error:#}")),
+                    Err(error) => view.report_error(format!("{error:#}"), cx),
                 }
                 cx.notify();
             });

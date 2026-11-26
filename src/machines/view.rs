@@ -2,7 +2,7 @@ use super::ssh::{Connection, SavedMachine};
 use crate::{
     conversation::{
         markdown_view::{ResponseRenderContext, contains_mermaid_fence, prose},
-        permission_card,
+        conversation_error_response, permission_card,
     },
     ui::{field, heading, hint, label},
 };
@@ -480,6 +480,45 @@ impl RemoteProject {
         )
     }
 
+    fn request_feedback(&self, cx: &Context<Self>) -> Option<Div> {
+        let pending = self.pending.clone().filter(|_| !self.working);
+        if self.error.is_none() && pending.is_none() {
+            return None;
+        }
+        Some(
+            v_flex()
+                .gap_2()
+                .when_some(self.error.as_deref(), |row, error| {
+                    row.child(conversation_error_response(error, cx))
+                })
+                .when_some(pending, |row, request| {
+                    row.child(
+                        h_flex()
+                            .gap_2()
+                            .child(control!(
+                                "Retry remote request",
+                                Button::new("retry-machine-request")
+                                    .label("Retry request")
+                                    .disabled(self.forward.is_none())
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.apply(request.clone(), window, cx)
+                                    }))
+                            ))
+                            .child(
+                                Button::new("dismiss-machine-request")
+                                    .ghost()
+                                    .label("Dismiss")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.pending = None;
+                                        view.error = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                }),
+        )
+    }
+
     fn message_row(
         &self,
         thread: &ThreadId,
@@ -573,6 +612,11 @@ impl RemoteProject {
                         view.error = Some("Bear could not confirm the approval. Check whether the request is still pending.".into());
                     }
                     _ => view.error = Some("Bear could not confirm the command. Retry to check the same request.".into()),
+                }
+                if view.error.is_some()
+                    && view.history_scroll.max_offset().height + view.history_scroll.offset().y <= px(2.)
+                {
+                    view.history_scroll.scroll_to_bottom();
                 }
                 cx.notify();
             });
@@ -727,45 +771,9 @@ impl Render for RemoteProject {
                                 )
                             })),
                     )
-                    .when_some(self.error.clone(), |panel, error| {
-                        panel.child(
-                            div()
-                                .px_5()
-                                .py_2()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(error),
-                        )
+                    .when(self.detail.is_none(), |panel| {
+                        panel.children(self.request_feedback(cx).map(|row| row.px_5()))
                     })
-                    .when_some(
-                        self.pending.clone().filter(|_| !self.working),
-                        |panel, request| {
-                            panel.child(
-                                h_flex()
-                                    .px_5()
-                                    .gap_2()
-                                    .child(control!(
-                                        "Retry remote request",
-                                        Button::new("retry-machine-request")
-                                            .label("Retry request")
-                                            .disabled(self.forward.is_none())
-                                            .on_click(cx.listener(move |view, _, w, cx| {
-                                                view.apply(request.clone(), w, cx)
-                                            }))
-                                    ))
-                                    .child(
-                                        Button::new("dismiss-machine-request")
-                                            .ghost()
-                                            .label("Dismiss")
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.pending = None;
-                                                view.error = None;
-                                                cx.notify();
-                                            })),
-                                    ),
-                            )
-                        },
-                    )
                     .map(|panel| match self.detail.as_ref() {
                         Some(detail) => {
                             let thread = detail.id.clone();
@@ -839,9 +847,12 @@ impl Render for RemoteProject {
                                             detail
                                                 .latest_run
                                                 .as_ref()
-                                                .and_then(|run| run.error.clone()),
-                                            |p, error| p.child(hint(error, cx)),
+                                                .and_then(|run| run.error.as_deref()),
+                                            |history, error| {
+                                                history.child(conversation_error_response(error, cx))
+                                            },
                                         )
+                                        .children(self.request_feedback(cx))
                                         .children(
                                             detail
                                                 .questions

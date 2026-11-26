@@ -166,7 +166,6 @@ pub(super) struct Attachments {
     files: Vec<DraftFile>,
     next_position: usize,
     pub(super) loading: bool,
-    error: Option<String>,
 }
 
 impl Attachments {
@@ -722,8 +721,9 @@ impl Desktop {
         cx.spawn_in(window, async move |view, cx| {
             let result: anyhow::Result<()> = async {
                 if let Some(path) = choice.await? {
+                    let save_thread = thread.clone();
                     cx.background_spawn(async move {
-                        let file = runtime.read_attachment_file(&thread, &message, position)?;
+                        let file = runtime.read_attachment_file(&save_thread, &message, position)?;
                         let directory = path.parent().context("Missing save directory")?;
                         let mut output = tempfile::NamedTempFile::new_in(directory)?;
                         output.write_all(&file.bytes)?;
@@ -737,8 +737,12 @@ impl Desktop {
             .await;
             if let Err(error) = result {
                 let _ = view.update(cx, |view, cx| {
-                    view.error = Some(format!("Could not save attachment. {error}"));
-                    cx.notify();
+                    view.record_error(
+                        Some(&thread),
+                        format!("Could not save attachment. {error}"),
+                        None,
+                        cx,
+                    );
                 });
             }
         })
@@ -925,8 +929,12 @@ impl Desktop {
         }
         let remaining = Attachment::MAX_FILES.saturating_sub(draft.active(&text).count());
         if remaining == 0 {
-            draft.error = Some("Attach up to eight files per message".into());
-            cx.notify();
+            self.record_error(
+                thread.as_ref(),
+                "Attach up to eight files per message".into(),
+                None,
+                cx,
+            );
             return;
         }
         let used = draft
@@ -934,7 +942,6 @@ impl Desktop {
             .map(|file| file.file.bytes.len())
             .sum::<usize>();
         draft.loading = true;
-        draft.error = None;
         let focus = window.focused(cx);
         let insertion = Insertion::capture(&input, window, cx);
         cx.notify();
@@ -997,11 +1004,11 @@ impl Desktop {
                                     );
                                 });
                             }
-                            Err(error) => draft.error = Some(error.to_string()),
+                            Err(error) => view.record_error(thread.as_ref(), error.to_string(), None, cx),
                         }
                     }
                     Ok(_) => {}
-                    Err(error) => draft.error = Some(format!("{error:#}")),
+                    Err(error) => view.record_error(thread.as_ref(), format!("{error:#}"), None, cx),
                 }
                 cx.notify();
             });
@@ -1170,7 +1177,7 @@ impl Desktop {
         let show = |file: &DraftFile| {
             file.position.is_none() || setup_text.as_ref().is_some_and(|text| file.is_active(text))
         };
-        if draft.error.is_none() && !draft.loading && !draft.files.iter().any(show) {
+        if !draft.loading && !draft.files.iter().any(show) {
             return None;
         }
         Some(
@@ -1205,7 +1212,6 @@ impl Desktop {
                                         let thread = view.current.as_ref().map(|t| t.id.clone());
                                         let draft = view.attachments_mut(thread.as_ref());
                                         let removed = draft.files.remove(index);
-                                        draft.error = None;
                                         if let Some(position) = removed.position {
                                             view.starter.update(cx, |input, cx| {
                                                 let text = input.value().replace(
@@ -1221,15 +1227,7 @@ impl Desktop {
                             )
                         }),
                 )
-                .when(draft.loading, |row| row.child(hint("Selecting files…", cx)))
-                .when_some(draft.error.as_ref(), |row, error| {
-                    row.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(error.clone()),
-                    )
-                }),
+                .when(draft.loading, |row| row.child(hint("Selecting files…", cx))),
         )
     }
 }

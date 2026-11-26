@@ -553,6 +553,9 @@ impl Desktop {
                                         header.child(self.new_draft_button(false, cx))
                                     }),
                             )
+                            .when_some(self.error.as_ref(), |page, error| {
+                                page.child(conversation_error_response(error, cx))
+                            })
                             .child(
                                 v_flex()
                                     .rounded_lg()
