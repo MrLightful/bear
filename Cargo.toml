@@ -24,7 +24,7 @@ markdown = "1"
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts"] }
+resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = "1"
@@ -45,6 +45,8 @@ core-foundation = "0.10"
 libc = "0.2"
 portable-pty = "0.9"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAccessibility", "NSWorkspace"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFData"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGAffineTransform", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage", "CGPDFDocument", "CGPDFPage"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSBundle", "NSString"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 

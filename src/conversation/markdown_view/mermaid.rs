@@ -1,4 +1,4 @@
-use super::super::{history_at_bottom, transcript::transcript_muted};
+use super::super::{history_at_bottom, svg_preview, transcript::transcript_muted};
 use anyhow::{Result, ensure};
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -7,11 +7,7 @@ use gpui_component::{
     h_flex, v_flex,
 };
 use mermaid_rs_renderer::{LayoutConfig, Theme, compute_layout, parse_mermaid_strict, render_svg};
-use resvg::{
-    tiny_skia::{Pixmap, Transform},
-    usvg,
-};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 const MAX_SOURCE_BYTES: usize = 16 * 1024;
 const MAX_DIAGRAM_PIXELS: f32 = 2048.;
@@ -181,43 +177,7 @@ fn rasterize(source: &str, dark: bool) -> Result<Arc<RenderImage>> {
     let layout = compute_layout(&parsed.graph, &theme, &layout_config);
     let svg = render_svg(&layout, &theme, &layout_config);
 
-    static FONTS: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
-        let mut fonts = usvg::fontdb::Database::new();
-        fonts.load_system_fonts();
-        Arc::new(fonts)
-    });
-    let options = usvg::Options {
-        fontdb: FONTS.clone(),
-        image_href_resolver: usvg::ImageHrefResolver {
-            resolve_data: Box::new(|_, _, _| None),
-            resolve_string: Box::new(|_, _| None),
-        },
-        ..Default::default()
-    };
-    let tree = usvg::Tree::from_data(svg.as_bytes(), &options)?;
-    let size = tree.size();
-    let scale = (MAX_DIAGRAM_PIXELS / size.width().max(size.height())).min(2.);
-    let width = (size.width() * scale).ceil() as u32;
-    let height = (size.height() * scale).ceil() as u32;
-    let mut pixmap =
-        Pixmap::new(width, height).ok_or_else(|| anyhow::anyhow!("Invalid diagram size"))?;
-    resvg::render(
-        &tree,
-        Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-
-    let pixels = pixmap
-        .pixels()
-        .iter()
-        .flat_map(|pixel| {
-            let color = pixel.demultiply();
-            [color.blue(), color.green(), color.red(), color.alpha()]
-        })
-        .collect();
-    let buffer = image::RgbaImage::from_raw(width, height, pixels)
-        .ok_or_else(|| anyhow::anyhow!("Invalid diagram pixels"))?;
-    Ok(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
+    svg_preview::rasterize(&svg, MAX_DIAGRAM_PIXELS)
 }
 
 #[cfg(test)]
