@@ -675,12 +675,7 @@ impl Desktop {
                     v_flex()
                         .gap_1()
                         .child(crate::ui::section_title("Message"))
-                        .child(
-                            div()
-                                .text_sm()
-                                .line_height(rems(1.35))
-                                .child(message.to_owned()),
-                        ),
+                        .child(draft_prompt_block(message.to_owned(), cx)),
                 )
             })
             .when(!draft.files.is_empty(), |panel| {
@@ -761,7 +756,7 @@ impl Desktop {
         } else if matches!(error, Some(DraftError::Delivery(_))) {
             "Retry"
         } else {
-            "Start conversation"
+            "Start"
         };
         let expanded = self.backlog.expanded_details.contains(&id);
         let edit = self.backlog.edit.as_ref().filter(|edit| edit.id == id);
@@ -890,17 +885,15 @@ impl Desktop {
                     .when(edit.is_none(), |body| {
                         body.child(control!(
                             format!("Draft prompt/{}", launch.name),
-                            div()
-                                .w_full()
-                                .text_base()
-                                .font_weight(FontWeight::MEDIUM)
-                                .line_height(rems(1.4))
-                                .line_clamp(3)
-                                .child(if preview.is_empty() {
+                            draft_prompt_block(
+                                if preview.is_empty() {
                                     "Attachment-only draft".into()
                                 } else {
                                     preview
-                                })
+                                },
+                                cx
+                            )
+                            .line_clamp(3)
                         ))
                     })
                     .when_some(edit, |body, edit| body.child(self.draft_editor(edit, cx)))
@@ -937,6 +930,19 @@ impl Desktop {
             });
         control!(format!("Draft card/{}", launch.name), row)
     }
+}
+
+fn draft_prompt_block(text: String, cx: &App) -> Div {
+    div()
+        .w_full()
+        .rounded_md()
+        .bg(cx.theme().muted)
+        .px_3()
+        .py_2()
+        .text_sm()
+        .font_weight(FontWeight::NORMAL)
+        .line_height(rems(1.375))
+        .child(text)
 }
 
 fn draft_meta(icon: IconName, text: String, cx: &App) -> Div {
