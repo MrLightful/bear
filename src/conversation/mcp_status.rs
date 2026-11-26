@@ -124,22 +124,47 @@ impl Desktop {
                 .provider_label(source.0.as_str())
                 .to_owned();
             let refresh_source = source.clone();
+            let settings_instance = source.0.clone();
+            let has_settings = self.runtime.provider_instances().any(|instance| {
+                instance.id == settings_instance && instance.driver == Provider::Codex
+            });
             let header = h_flex()
                 .justify_between()
                 .gap_3()
                 .child(crate::ui::section_title("MCP servers"))
-                .child(control!(
-                    "Refresh MCP status",
-                    Button::new("refresh-mcp-status")
-                        .small()
-                        .ghost()
-                        .icon(Icon::default().path("icons/provider-refresh.svg"))
-                        .tooltip("Refresh MCP status")
-                        .loading(status.result.is_none())
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.load_mcp_status(refresh_source.clone(), cx);
-                        }))
-                ));
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(control!(
+                            "Refresh MCP status",
+                            Button::new("refresh-mcp-status")
+                                .small()
+                                .ghost()
+                                .icon(Icon::default().path("icons/provider-refresh.svg"))
+                                .tooltip("Refresh MCP status")
+                                .loading(status.result.is_none())
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.load_mcp_status(refresh_source.clone(), cx);
+                                }))
+                        ))
+                        .when(has_settings, |actions| {
+                            actions.child(control!(
+                                "Open MCP settings",
+                                Button::new("open-mcp-settings")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Settings)
+                                    .tooltip("Open MCP settings")
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.open_settings(
+                                            SettingsTarget::ProviderMcp(&settings_instance),
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            ))
+                        }),
+                );
             let body = match &status.result {
                 None => control!("Checking MCP servers…", hint("Checking MCP servers…", cx)),
                 Some(Ok(None)) => {

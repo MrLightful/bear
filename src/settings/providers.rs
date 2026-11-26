@@ -153,6 +153,23 @@ impl Settings {
         }
     }
 
+    pub(super) fn open_provider_mcp_settings(
+        &mut self,
+        instance: &ProviderInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_provider_settings(instance, window, cx);
+        if self.provider_details_open()
+            && self.providers.selected == *instance
+            && self.selected_provider().driver == Provider::Codex
+        {
+            self.providers.models_open = false;
+            self.providers.mcp_open = true;
+            cx.notify();
+        }
+    }
+
     pub(super) fn selected_provider(&self) -> &ProviderInstance {
         self.runtime
             .provider_instances()

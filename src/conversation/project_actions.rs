@@ -428,7 +428,9 @@ impl Desktop {
         if self.current.as_ref().is_some_and(|thread| thread.id == id)
             && let Some(result) = result
         {
-            self.error = result.err().map(|error| format!("{error:#}"));
+            if let Err(error) = result {
+                self.record_error(Some(&id), format!("{error:#}"), None, cx);
+            }
             self.pull_request = None;
             self.watch_pull_request(cx);
         }
@@ -447,9 +449,8 @@ impl Desktop {
         cx.spawn(async move |view, cx| {
             let result = job.await;
             let _ = view.update(cx, |view, cx| {
-                if view.current.as_ref().is_some_and(|thread| thread.id == id) {
-                    view.error = result.err().map(|error| error.to_string());
-                    cx.notify();
+                if let Err(error) = result {
+                    view.record_error(Some(&id), error.to_string(), None, cx);
                 }
             });
         })

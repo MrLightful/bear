@@ -325,6 +325,26 @@ impl Desktop {
             .foreground_run
             .as_ref()
             .filter(|_| self.before.is_none());
+        let run_error = foreground
+            .or(thread.latest_run.as_ref().filter(|_| self.before.is_none()))
+            .and_then(|run| run.error.as_deref().map(|error| (&run.id, error)));
+        let workspace = &self.workspaces[&thread.id];
+        let errors = workspace.errors.iter().enumerate();
+        let error_row = |(index, error): (usize, &ConversationError), cx: &App| {
+            conversation_error_response(&error.message, cx)
+                .w(response_width)
+                .when_some(error.unsent_message.clone(), |row, text| {
+                    row.child(h_flex().mt_2().child(
+                        Button::new(("copy-follow-up", index))
+                            .small()
+                            .label("Copy message")
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            }),
+                    ))
+                })
+        };
+        let mut run_error_shown = false;
         for messages in messages.chunk_by(|a, b| a.message.run_id == b.message.run_id) {
             let run = &messages[0].message.run_id;
             let activity = thread
@@ -351,8 +371,13 @@ impl Desktop {
                         cx,
                     ));
                 }
-                rows =
-                    rows.child(self.message_row(thread, item, provider, content_width, window, cx));
+                rows = rows
+                    .child(self.message_row(thread, item, provider, content_width, window, cx))
+                    .children(
+                        errors.clone()
+                            .filter(|(_, error)| error.after.as_ref() == Some(&item.message.id))
+                            .map(|error| error_row(error, cx)),
+                    );
             }
             if let Some(activity) = activity
                 && shown.insert(run)
@@ -362,10 +387,19 @@ impl Desktop {
             if streaming {
                 rows = rows.children(self.streaming(thread, response_width, window, cx));
             }
+            if let Some((_, error)) = run_error.filter(|(id, _)| *id == run && !run_error_shown) {
+                rows = rows.child(conversation_error_response(error, cx).w(response_width));
+                run_error_shown = true;
+            }
             history = history.child(rows);
         }
         let mut tail = Vec::new();
-        if messages.is_empty() && thread.foreground_run.is_none() {
+        if messages.is_empty()
+            && thread.foreground_run.is_none()
+            && run_error.is_none()
+            && workspace.errors.is_empty()
+            && !self.checkout_unavailable
+        {
             tail.push(hint("Send a message to start this conversation.", cx));
         }
         if self.before.is_none() {
@@ -393,6 +427,37 @@ impl Desktop {
                 };
                 tail.push(activity_row(IconName::Bot, &child.path, Some(status), cx));
             }
+        }
+        if let Some((_, error)) = run_error.filter(|_| !run_error_shown) {
+            tail.push(conversation_error_response(error, cx).w(response_width));
+        }
+        tail.extend(
+            errors
+                .filter(|(_, error)| error.after.is_none())
+                .map(|error| error_row(error, cx)),
+        );
+        if self.checkout_unavailable {
+            tail.push(
+                v_flex()
+                    .w(response_width)
+                    .gap_2()
+                    .child(conversation_error_response(
+                        &format!(
+                            "Checkout unavailable. Restore {} to continue this conversation, or start one in another checkout.",
+                            workspace.root.display()
+                        ),
+                        cx,
+                    ))
+                    .child(h_flex().child(control!(
+                        "Choose another checkout",
+                        Button::new("replace-checkout")
+                            .label("Choose another checkout")
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.new_conversation(false, window, cx);
+                                view.open_project_picker(window, cx);
+                            }))
+                    ))),
+            );
         }
         if !tail.is_empty() {
             history = history.child(column().children(tail));
@@ -566,7 +631,7 @@ impl Desktop {
                                     Ok(body) => {
                                         view.full_messages.insert(id.clone(), body);
                                     }
-                                    Err(error) => view.error = Some(error.to_string()),
+                                    Err(error) => view.report_error(error.to_string(), cx),
                                 }
                             }
                             cx.notify();

@@ -174,6 +174,7 @@ impl Render for FileTree {
                     }),
                 )
                 .size_full()
+                .px_1()
                 .with_sizing_behavior(ListSizingBehavior::Auto)
                 .track_scroll(self.scroll.clone());
                 return div()
