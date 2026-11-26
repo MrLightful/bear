@@ -1,8 +1,9 @@
 use anyhow::{Context as _, Result};
-use huggler::{HugglerOptions, StorageLayout};
+use huggler::{HugglerOptions, StorageLayout, WorktreeRoot};
 use std::path::{Path, PathBuf};
 
 const USERDATA: &str = "userdata";
+const WORKTREES: &str = "worktrees";
 
 pub(crate) struct StoragePaths {
     base: PathBuf,
@@ -69,11 +70,16 @@ impl StoragePaths {
         self.base.join("scratch")
     }
 
+    pub(crate) fn worktrees_dir(&self) -> PathBuf {
+        self.base.join(WORKTREES)
+    }
+
     pub(crate) fn runtime_options(&self) -> Result<HugglerOptions> {
         let mut options = HugglerOptions::new(&self.base).with_name("Bear")?;
         options.storage.database_path = self
             .state_subdirectory()
             .join(&options.storage.database_path);
+        options.storage.worktree_root = WorktreeRoot::Shared(WORKTREES.into());
         options.output.version = env!("CARGO_PKG_VERSION").into();
         Ok(options)
     }

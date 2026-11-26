@@ -56,19 +56,73 @@ def check_general(executable, state, env):
     ], env)
 
 
-def check_storage(executable, state, env):
+def check_worktrees(executable, state, env):
     run_window(executable, state, [
         {"resize": [640, 440]}, {"key": "cmd-,"}, {"center_x": ["Appearance", 320]},
         {"absent": "Done"}, {"same_line": ["Show conversations", "Back to workspace"]},
         *({"right_of": [f"settings-chevron/{name}", f"settings-summary/{name}"]}
-          for name in ("Appearance", "Providers", "Storage")),
-        {"click": "Storage"},
+          for name in ("Appearance", "Providers", "Worktrees")),
+        {"resize": [1120, 740]}, {"click": "Worktrees"}, {"resize": [640, 440]},
         {"same_line": ["Show conversations", "Back to Settings"]},
         {"see": "automatic-cleanup/Off"}, {"click": "Clean up worktrees now"},
         {"see": "No unused worktrees found."}, {"click": "automatic-cleanup/On"},
         {"click": "Back to Settings"}, {"see": "Providers"}, {"click": "Back to workspace"},
     ], env)
     assert json.loads((state / "preferences.json").read_text())["automaticWorktreeCleanup"] is True
+
+    checkout = state / "checkout"
+    subprocess.run(["git", "init", "-qb", "main", checkout], check=True)
+    (checkout / "tracked.txt").write_text("Original content")
+    subprocess.run(["git", "-C", checkout, "add", "tracked.txt"], check=True)
+    subprocess.run([
+        "git", "-C", checkout, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
+        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+        "commit", "-qm", "Initial commit",
+    ], check=True)
+    env = dict(env, HUGGLER_CODEX=str(ROOT / "tests/fixtures/context-provider.py"))
+    run_window(executable, state, launch_thread(checkout, "Worktree check", branch="worktree-check"), env)
+    with sqlite3.connect(state / "huggler.sqlite3") as db:
+        path, project = db.execute(
+            "SELECT p.root, p.id FROM allocated_workspace a JOIN project p ON p.id = a.project"
+        ).fetchone()
+
+    open_worktrees = [{"key": "cmd-,"}, {"click": "Worktrees"}]
+    finder = f"Open in Finder/{path}"
+    remove = f"Remove worktree/{path}"
+    run_window(executable, state, [*open_worktrees, {"see": finder}, {"absent": remove}], env)
+
+    # Set up an unused allocation while Bear is closed.
+    with sqlite3.connect(state / "huggler.sqlite3") as db:
+        db.execute("DELETE FROM event WHERE thread_id IN (SELECT id FROM thread WHERE project=?)", (project,))
+        db.execute("DELETE FROM thread WHERE project=?", (project,))
+    worktree = Path(path)
+    (worktree / "frames.ndjson").unlink(missing_ok=True)
+    note = worktree / "local-note.txt"
+    note.write_text("Keep local work")
+    run_window(executable, state, [
+        *open_worktrees, {"see": finder},
+        {"next_prompt_answer": 1}, {"click": remove}, {"contains": f"Could not remove {path}."},
+    ], env)
+    assert note.read_text() == "Keep local work"
+
+    note.unlink()
+    tracked = worktree / "tracked.txt"
+    subprocess.run(["git", "-C", worktree, "update-index", "--assume-unchanged", "tracked.txt"], check=True)
+    tracked.write_text("Hidden local work")
+    run_window(executable, state, [
+        *open_worktrees, {"see": finder},
+        {"next_prompt_answer": 1}, {"click": remove}, {"contains": "tracked files hidden from Git status"},
+    ], env)
+    assert tracked.read_text() == "Hidden local work"
+    tracked.write_text("Original content")
+    subprocess.run(["git", "-C", worktree, "update-index", "--no-assume-unchanged", "tracked.txt"], check=True)
+
+    run_window(executable, state, [
+        *open_worktrees, {"see": finder},
+        {"next_prompt_answer": 0}, {"click": remove}, {"see": finder},
+        {"next_prompt_answer": 1}, {"click": remove}, {"see": "Worktree removed."}, {"absent": finder},
+    ], env)
+    assert not worktree.exists()
 
 
 def check_projects(executable, root, env):
@@ -345,7 +399,7 @@ def check(executable):
             exclude.write("\n/frames.ndjson\n")
         env = dict(isolated_env(root), HUGGLER_CLAUDE_ACP=str(root / "missing-claude-agent"))
         check_general(executable, root / "general", env)
-        check_storage(executable, root / "storage", env)
+        check_worktrees(executable, root / "worktrees", env)
         check_projects(executable, root / "projects", env)
         check_provider_setup(executable, root, env)
         fixture = ROOT / "tests/fixtures/context-provider.py"

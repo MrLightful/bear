@@ -208,7 +208,7 @@ impl Desktop {
         let settings = cx.new(|cx| {
             Settings::new(
                 prefs,
-                state.clone(),
+                &paths,
                 runtime.clone(),
                 load_error,
                 executor.clone(),
