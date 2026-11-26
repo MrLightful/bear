@@ -62,21 +62,6 @@ fn action_menu(
 }
 
 impl Desktop {
-    pub(super) fn resolve_terminal_project(&self, thread: ThreadId, cx: &mut Context<Self>) {
-        let root = self.workspaces[&thread].root.clone();
-        let lookup = cx.background_spawn(async move { git::main_worktree(&root).ok() });
-        cx.spawn(async move |view, cx| {
-            let main_worktree = lookup.await;
-            let _ = view.update(cx, |view, cx| {
-                if let Some(workspace) = view.workspaces.get_mut(&thread) {
-                    workspace.terminal.main_worktree = main_worktree;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
     pub(super) fn terminal_action_picker(
         &self,
         thread: &ThreadId,
@@ -85,13 +70,10 @@ impl Desktop {
         let workspace = &self.workspaces[thread];
         let settings = self.settings.read(cx);
         let projects = settings.saved_projects();
-        let project = projects
-            .iter()
-            .find(|project| project.root == workspace.root)
-            .or_else(|| settings.worktree_project(&workspace.root));
+        let project = settings.checkout_project(&workspace.root);
         let root = project
             .map(|project| &project.root)
-            .or(workspace.terminal.main_worktree.as_ref())?;
+            .or(workspace.main_worktree.as_ref())?;
         let actions = project
             .or_else(|| projects.iter().find(|project| project.root == *root))
             .map(|project| project.actions.clone())

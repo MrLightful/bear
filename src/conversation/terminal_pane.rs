@@ -18,7 +18,6 @@ pub(super) struct TerminalPane {
     scroll: ScrollHandle,
     open: bool,
     height: Option<f32>,
-    pub(super) main_worktree: Option<PathBuf>,
 }
 
 struct TerminalTab {

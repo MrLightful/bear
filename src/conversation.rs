@@ -73,6 +73,7 @@ fn history_at_bottom(scroll: &ScrollHandle) -> bool {
 
 struct Workspace {
     root: PathBuf,
+    main_worktree: Option<PathBuf>,
     files: Entity<FileTree>,
     changes: Entity<Changes>,
     documents: DocumentTabs,
@@ -657,6 +658,7 @@ impl Desktop {
                 id.clone(),
                 Workspace {
                     root,
+                    main_worktree: None,
                     files,
                     changes,
                     documents: DocumentTabs::default(),
@@ -668,8 +670,7 @@ impl Desktop {
                     terminal: terminal_pane::TerminalPane::default(),
                 },
             );
-            #[cfg(target_os = "macos")]
-            self.resolve_terminal_project(id.clone(), cx);
+            self.resolve_main_worktree(id.clone(), cx);
         }
         Ok(())
     }
@@ -1280,10 +1281,7 @@ impl Desktop {
     fn workspace_header(&self, navigation_open: bool, right_open: bool, cx: &Context<Self>) -> Div {
         let (project, title) = match &self.current {
             Some(thread) => (
-                self.workspaces[&thread.id]
-                    .root
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned()),
+                self.workspace_project_name(&self.workspaces[&thread.id], cx),
                 thread.name.as_str(),
             ),
             None => (self.launch_project_name(cx), "Create"),
