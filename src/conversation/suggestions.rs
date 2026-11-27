@@ -6,13 +6,13 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use huggler::ProviderSkill;
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 const LIMIT: usize = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    Files,
+    Paths,
     Skills,
 }
 
@@ -37,7 +37,7 @@ impl Trigger {
                 .find(char::is_whitespace)
                 .unwrap_or(text.len() - cursor);
         let kind = match before.as_bytes().get(start) {
-            Some(b'@') => Kind::Files,
+            Some(b'@') => Kind::Paths,
             Some(b'/') if !text[start + 1..end].contains(['/', '\\']) => Kind::Skills,
             _ => return None,
         };
@@ -56,14 +56,15 @@ impl Trigger {
     }
 }
 
-struct FileMatch {
+struct PathMatch {
     path: String,
     name: String,
     search_path: String,
+    is_directory: bool,
 }
 
-impl FileMatch {
-    fn new(path: PathBuf) -> Option<Self> {
+impl PathMatch {
+    fn new(path: &Path, is_directory: bool) -> Option<Self> {
         let name = path.file_name()?.to_str()?.to_owned();
         let path = path.to_str()?.to_owned();
         if path.chars().any(char::is_control) {
@@ -73,6 +74,7 @@ impl FileMatch {
             name,
             search_path: path.to_lowercase(),
             path,
+            is_directory,
         })
     }
 
@@ -97,16 +99,17 @@ impl FileMatch {
     }
 }
 
-fn checkout_files(
+fn checkout_paths(
     root: &Path,
     starter: bool,
     base: Option<&str>,
-) -> anyhow::Result<Vec<FileMatch>> {
+) -> anyhow::Result<Vec<PathMatch>> {
     let root = if starter {
         git::checkout_root(root)?
     } else {
         root.to_path_buf()
     };
+    let mut directories = HashSet::new();
     let paths = if let Some(base) = base {
         git::files_at(&root, base)?
     } else if root.join(".git").exists() {
@@ -116,15 +119,14 @@ fn checkout_files(
             .collect()
     } else {
         let mut files = Vec::new();
-        let mut dirs = vec![PathBuf::new()];
-        while let Some(dir) = dirs.pop() {
+        let mut pending = vec![PathBuf::new()];
+        while let Some(dir) = pending.pop() {
             let entries = match fs::read_dir(root.join(&dir)) {
                 Ok(entries) => entries,
                 Err(error) if dir.as_os_str().is_empty() => return Err(error.into()),
                 Err(_) => continue,
             };
-            for entry in entries {
-                let Ok(entry) = entry else { continue };
+            for entry in entries.flatten() {
                 let path = dir.join(entry.file_name());
                 let Ok(kind) = entry.file_type() else {
                     continue;
@@ -132,40 +134,62 @@ fn checkout_files(
                 if kind.is_file() {
                     files.push(path);
                 } else if kind.is_dir() && entry.file_name() != ".git" {
-                    dirs.push(path);
+                    directories.insert(path.clone());
+                    pending.push(path);
                 }
             }
         }
         files
     };
-    let mut files: Vec<_> = paths.into_iter().filter_map(FileMatch::new).collect();
-    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    files.dedup_by(|a, b| a.path == b.path);
-    Ok(files)
+    // Derive Git folders from the same paths that are visible to file search.
+    for path in &paths {
+        for parent in path
+            .ancestors()
+            .skip(1)
+            .take_while(|p| !p.as_os_str().is_empty())
+        {
+            if !directories.insert(parent.to_path_buf()) {
+                break;
+            }
+        }
+    }
+    let mut matches: Vec<_> = paths
+        .iter()
+        .filter_map(|path| PathMatch::new(path, false))
+        .chain(
+            directories
+                .iter()
+                .filter_map(|path| PathMatch::new(path, true)),
+        )
+        .collect();
+    matches.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    matches.dedup_by(|a, b| a.path == b.path);
+    Ok(matches)
 }
 
 struct Choice {
     label: String,
+    icon: IconName,
     detail: String,
     replacement: String,
 }
 
 enum Catalog {
-    Files(Vec<FileMatch>),
+    Paths(Vec<PathMatch>),
     Skills(Vec<ProviderSkill>),
 }
 
 impl Catalog {
     fn matches(&self, query: &str) -> Vec<Choice> {
         match self {
-            Self::Files(files) => {
-                let mut matches: Vec<_> = files
+            Self::Paths(paths) => {
+                let mut matches: Vec<_> = paths
                     .iter()
-                    .filter_map(|file| {
-                        let offset = file.search_path.find(query)?;
-                        let name = file.search_path.rsplit('/').next().unwrap_or_default();
+                    .filter_map(|entry| {
+                        let offset = entry.search_path.find(query)?;
+                        let name = entry.search_path.rsplit('/').next().unwrap_or_default();
                         let rank = match_rank(name, query).unwrap_or(3);
-                        Some(((rank, offset, file.path.len(), &file.path), file))
+                        Some(((rank, offset, entry.path.len(), &entry.path), entry))
                     })
                     .collect();
                 if matches.len() > LIMIT {
@@ -175,14 +199,19 @@ impl Catalog {
                 matches.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                 matches
                     .into_iter()
-                    .map(|(_, file)| Choice {
-                        label: file.name.clone(),
-                        detail: Path::new(&file.path)
+                    .map(|(_, entry)| Choice {
+                        label: entry.name.clone(),
+                        icon: if entry.is_directory {
+                            IconName::Folder
+                        } else {
+                            IconName::File
+                        },
+                        detail: Path::new(&entry.path)
                             .parent()
                             .and_then(Path::to_str)
                             .unwrap_or_default()
                             .into(),
-                        replacement: format!("{} ", file.reference()),
+                        replacement: format!("{} ", entry.reference()),
                     })
                     .collect()
             }
@@ -234,6 +263,7 @@ fn skill_choice(skill: &ProviderSkill, ambiguous: bool) -> Option<Choice> {
     };
     Some(Choice {
         label: format!("/{}", skill.name),
+        icon: IconName::BookOpen,
         detail,
         replacement,
     })
@@ -281,7 +311,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(file) = FileMatch::new(path.to_path_buf()) else {
+        let Some(reference) = PathMatch::new(path, false) else {
             self.report_error("Could not attach this path to the message.".into(), cx);
             return;
         };
@@ -293,7 +323,7 @@ impl Desktop {
             } else {
                 " "
             };
-            let reference = format!("{separator}{} ", file.reference());
+            let reference = format!("{separator}{} ", reference.reference());
             input.replace_text_in_range(Some(end..end), &reference, window, cx);
         });
     }
@@ -379,14 +409,14 @@ impl Desktop {
             selected: 0,
             choices: Vec::new(),
             catalog: Err(match trigger.kind {
-                Kind::Files => "Searching files…",
+                Kind::Paths => "Searching paths…",
                 Kind::Skills => "Loading skills…",
             }),
             _load: None,
             trigger,
         };
-        if menu.trigger.kind == Kind::Files && checkout.as_os_str().is_empty() {
-            menu.catalog = Err("Choose a checkout to search files");
+        if menu.trigger.kind == Kind::Paths && checkout.as_os_str().is_empty() {
+            menu.catalog = Err("Choose a checkout to search paths");
         } else {
             let kind = menu.trigger.kind;
             let starter = self.current.is_none();
@@ -401,18 +431,18 @@ impl Desktop {
             let runtime = self.runtime.clone();
             let job = cx.background_spawn(async move {
                 match kind {
-                    Kind::Files => {
+                    Kind::Paths => {
                         let base = if worktree && selected.is_none() {
                             git::branches(&checkout)
-                                .map_err(|_| "Could not read workspace files")?
+                                .map_err(|_| "Could not read workspace paths")?
                                 .default
                                 .map(|branch| branch.reference)
                         } else {
                             selected
                         };
-                        checkout_files(&checkout, starter, base.as_deref())
-                            .map(Catalog::Files)
-                            .map_err(|_| "Could not read workspace files")
+                        checkout_paths(&checkout, starter, base.as_deref())
+                            .map(Catalog::Paths)
+                            .map_err(|_| "Could not read workspace paths")
                     }
                     Kind::Skills => {
                         let cwd = if checkout.as_os_str().is_empty() {
@@ -685,10 +715,6 @@ impl Desktop {
         let Some(menu) = &self.suggestions.menu else {
             return field;
         };
-        let icon = match menu.trigger.kind {
-            Kind::Files => IconName::File,
-            Kind::Skills => IconName::BookOpen,
-        };
         let mut popup = v_flex()
             .id("message-suggestions")
             .w(px(328.))
@@ -702,7 +728,7 @@ impl Desktop {
                 .err()
                 .copied()
                 .unwrap_or(match menu.trigger.kind {
-                    Kind::Files => "No matching files",
+                    Kind::Paths => "No matching paths",
                     Kind::Skills => "No matching skills",
                 });
             popup = popup.child(control!(status, hint(status, cx).px_2().py_1()));
@@ -740,7 +766,7 @@ impl Desktop {
                                 Tooltip::new(detail.clone()).build(window, cx)
                             })
                         })
-                        .child(Icon::new(icon.clone()).small().flex_shrink_0())
+                        .child(Icon::new(choice.icon.clone()).small().flex_shrink_0())
                         .child(
                             div()
                                 .max_w(relative(0.65))
