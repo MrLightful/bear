@@ -198,8 +198,8 @@ impl Desktop {
             Section::Attention,
             Section::Ready,
             Section::Working,
-            Section::Settled,
             Section::Stash,
+            Section::Settled,
         ] {
             // Keep the space above the lower groups even when Working is empty.
             if section == Section::Working {
