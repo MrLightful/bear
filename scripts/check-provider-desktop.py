@@ -219,12 +219,14 @@ def check_suggestions(executable, tmp, env):
     (checkout / "docs").mkdir()
     (checkout / "docs" / "Setup (local).md").touch()
     (checkout / "docs" / "Setup.md").touch()
-    (checkout / ".gitignore").write_text("private.md\n")
+    (checkout / ".gitignore").write_text("private.md\nprivate-folder/\n")
+    (checkout / "private-folder").mkdir()
+    (checkout / "private-folder" / "hidden.md").touch()
     (checkout / "private.md").touch()
     env = dict(env, HUGGLER_CODEX=str(ROOT / "tests/fixtures/context-provider.py"))
     first = "$build-guide Read [Setup (local).md](docs/Setup%20%28local%29.md) first"
     followup = (
-        "🛠 Use $lint-guide please with [Setup.md](docs/Setup.md) and "
+        "🛠 Use $lint-guide please with [Setup.md](docs/Setup.md) in [docs](docs) and "
         f"[$shared-skill]({checkout / 'user' / 'SKILL.md'}) again"
     )
     ready = "Ready/$build-guide Read Setup (local).md first/Completed"
@@ -243,9 +245,10 @@ def check_suggestions(executable, tmp, env):
         {"key": "cmd-a"}, {"type": "🛠 Use /lint please"},
         {"key": "alt-left"}, {"key": "left"}, {"see": "suggestion//lint-guide"},
         {"click": "suggestion//lint-guide"},
-        {"key": "cmd-right"}, {"type": " with @private"}, {"see": "No matching files"},
+        {"key": "cmd-right"}, {"type": " with @private"}, {"see": "No matching paths"}, {"absent": "suggestion/private-folder"},
         *[{"key": "backspace"}] * len("private"), {"type": "setup"},
-        {"see": "suggestion/Setup.md"}, {"key": "enter"}, {"type": "and /shared"},
+        {"see": "suggestion/Setup.md"}, {"key": "enter"}, {"type": "in @docs"},
+        {"see": "suggestion/docs"}, {"key": "enter"}, {"type": "and /shared"},
         {"see": "suggestion//shared-skill"}, {"key": "down"}, {"key": "enter"},
         {"type": "again"},
         {"key": "enter"}, {"see": f"You/{followup}"}, {"see": ready},
