@@ -9,7 +9,7 @@ const PROVIDER_LABEL_WIDTH: Pixels = px(95.);
 
 impl Desktop {
     pub(in crate::conversation) fn model_control(&self, cx: &Context<Self>) -> Div {
-        let (model, options) = self.model_selection();
+        let (model, options) = self.model_selection(cx);
         let source = self.picker_source(cx);
         let driver = self
             .runtime
@@ -506,10 +506,11 @@ impl Desktop {
         });
         if persisted {
             self.error = None;
-            if let Some(list) = &self.model_picker
-                && list.read(cx).delegate().favorites_open
-            {
-                self.open_models(true, window, cx);
+            if let Some(list) = &self.model_picker {
+                let favorites_open = list.read(cx).delegate().favorites_open;
+                if favorites_open || (self.current.is_none() && self.launch_provider.is_none()) {
+                    self.open_models(favorites_open, window, cx);
+                }
             }
         } else {
             self.report_error("Could not save model favorites.".into(), cx);

@@ -491,7 +491,7 @@ impl Desktop {
                 thread.provider_instance.clone(),
                 self.workspaces[&thread.id].root.clone(),
             ),
-            None => (self.instance.clone(), self.launch_checkout(cx)),
+            None => (self.launch_provider(cx), self.launch_checkout(cx)),
         }
     }
 
@@ -570,9 +570,44 @@ impl Desktop {
         catalog
     }
 
-    fn model_selection(&self) -> (Option<&str>, &ModelOptions) {
+    fn default_launch_favorite<'a>(&self, cx: &'a App) -> Option<&'a ModelFavorite> {
+        if self.launch_provider.is_some() {
+            return None;
+        }
+        let settings = self.settings.read(cx);
+        settings.model_favorites().iter().find(|favorite| {
+            self.runtime.provider_instances().any(|provider| {
+                provider.id == favorite.provider && settings.provider_configured(provider)
+            }) && settings
+                .model_preferences(&favorite.provider)
+                .enabled(&favorite.model)
+        })
+    }
+
+    pub(super) fn launch_provider(&self, cx: &App) -> ProviderInstanceId {
+        self.launch_provider
+            .as_ref()
+            .or_else(|| {
+                self.default_launch_favorite(cx)
+                    .map(|favorite| &favorite.provider)
+            })
+            .cloned()
+            .unwrap_or_else(|| Provider::Codex.key().into())
+    }
+
+    fn model_selection<'a>(&'a self, cx: &'a App) -> (Option<&'a str>, &'a ModelOptions) {
         match &self.current {
             Some(thread) => (thread.model.as_deref(), &thread.model_options),
+            None => self.launch_model_selection(cx),
+        }
+    }
+
+    pub(super) fn launch_model_selection<'a>(
+        &'a self,
+        cx: &'a App,
+    ) -> (Option<&'a str>, &'a ModelOptions) {
+        match self.default_launch_favorite(cx) {
+            Some(favorite) => (Some(&favorite.model), &favorite.options),
             None => (self.launch_model.as_deref(), &self.launch_model_options),
         }
     }
@@ -582,7 +617,7 @@ impl Desktop {
         update: impl FnOnce(&mut ModelOptions),
         cx: &mut Context<Self>,
     ) {
-        let (model, options) = self.model_selection();
+        let (model, options) = self.model_selection(cx);
         let mut options = options.clone();
         update(&mut options);
         self.set_model_selection(model.map(str::to_owned), options, cx);
@@ -605,12 +640,13 @@ impl Desktop {
                 .and_then(|_| self.refresh());
             self.report(result, cx);
         } else {
+            self.launch_provider = Some(self.launch_provider(cx));
             self.launch_model = model;
             self.launch_model_options = options;
             cx.notify();
         }
         if let Some(list) = &self.model_picker {
-            let options = self.model_selection().1.clone();
+            let options = self.model_selection(cx).1.clone();
             list.update(cx, |list, cx| {
                 list.delegate_mut().options = options;
                 cx.notify();
@@ -651,7 +687,7 @@ impl Desktop {
         let catalog = configured
             .contains(&source.0)
             .then(|| self.catalog_for(source.clone(), false, cx));
-        let (current, options) = self.model_selection();
+        let (current, options) = self.model_selection(cx);
         let current = current.map(str::to_owned);
         let options = options.clone();
         let settings = self.settings.read(cx);
@@ -769,11 +805,11 @@ impl Desktop {
                     }
                     view.set_model_selection(Some(favorite.model), favorite.options, cx);
                 }
-                ModelChoice::Model(model) if view.model_selection().0 != Some(model.as_str()) => {
+                ModelChoice::Model(model) if view.model_selection(cx).0 != Some(model.as_str()) => {
                     let options = if provider_model.as_deref() == Some(model.as_str())
-                        && view.model_selection().0.is_none()
+                        && view.model_selection(cx).0.is_none()
                     {
-                        view.model_selection().1.clone()
+                        view.model_selection(cx).1.clone()
                     } else {
                         ModelOptions::default()
                     };
