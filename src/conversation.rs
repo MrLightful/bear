@@ -10,6 +10,7 @@ mod models;
 mod project_actions;
 mod projects;
 mod sidebar;
+mod stash;
 mod suggestions;
 mod svg_preview;
 #[cfg(target_os = "macos")]
@@ -45,10 +46,11 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable,
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
+    notification::Notification,
     v_flex,
 };
 use huggler::{
@@ -160,6 +162,7 @@ pub struct Desktop {
     selection_file: PathBuf,
     scratch_root: PathBuf,
     threads: Vec<ConversationSummary>,
+    stash: stash::Stash,
     agent_activity: agent_activity::AgentActivity,
     expanded_sections: HashMap<sidebar::Section, bool>,
     current: Option<ConversationDetail>,
@@ -290,6 +293,7 @@ impl Desktop {
             },
         )
         .detach();
+        let (stash, stash_error) = stash::Stash::load(state.join("stashed-conversations"));
         let mut view = Self {
             settings,
             show_settings: false,
@@ -309,6 +313,7 @@ impl Desktop {
             scratch_root: paths.scratch_dir(),
             selection_file: state.join("selected-thread"),
             threads: Vec::new(),
+            stash,
             agent_activity: agent_activity::AgentActivity::default(),
             expanded_sections: HashMap::new(),
             current: None,
@@ -444,6 +449,15 @@ impl Desktop {
             }));
         }
         view.report(restored.map(|_| ()), cx);
+        if let Some(error) = stash_error {
+            window.defer(cx, move |window, cx| {
+                window.push_notification(
+                    Notification::error(error.to_string())
+                        .title("Could not load stashed conversations"),
+                    cx,
+                );
+            });
+        }
         view
     }
 
@@ -498,7 +512,7 @@ impl Desktop {
             .threads
             .iter()
             .find(|t| Some(&t.id.0) == saved.as_ref())
-            .or_else(|| self.threads.first());
+            .or_else(|| self.threads.iter().find(|t| !self.stash.contains(&t.id)));
         if let Some(thread) = selected {
             self.select(thread.id.clone(), window, cx)?;
         } else {

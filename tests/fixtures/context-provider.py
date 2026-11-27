@@ -217,6 +217,9 @@ for line in sys.stdin:
         if text == "finish before ack":
             completed()
             continue
+        if prompt == "stash while running" and text == "request input":
+            emit(id="ask", method="item/tool/requestUserInput", params={
+                "threadId": session, "turnId": turn, "questions": [{"id": "one"}]})
         if text == "drop":
             sys.exit(0)
         result = {"turnId": turn}
@@ -254,7 +257,7 @@ for line in sys.stdin:
                 questions.append({"id": "two"})
             emit(id="ask", method="item/tool/requestUserInput", params={"threadId": session, "turnId": turn,
                  "questions": questions})
-        else:
+        elif prompt != "stash while running":
             completed()
 
 # EOF proves the adapter has finished processing the sample response.

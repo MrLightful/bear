@@ -114,6 +114,7 @@ pub(super) enum Section {
     Ready,
     Working,
     Settled,
+    Stash,
 }
 
 impl Section {
@@ -123,6 +124,7 @@ impl Section {
             Self::Ready => "Ready",
             Self::Working => "Working",
             Self::Settled => "Settled",
+            Self::Stash => "Stash",
         }
     }
 
@@ -132,6 +134,11 @@ impl Section {
             Self::Ready => (IconName::ArrowRight, 0x177243, 0x63ce91),
             Self::Working => (IconName::LoaderCircle, 0x285eaa, 0x7fb3ff),
             Self::Settled => (IconName::Check, 0x5d6576, 0xaaa7bc),
+            Self::Stash => {
+                return Icon::new(IconName::Inbox)
+                    .small()
+                    .text_color(cx.theme().muted_foreground);
+            }
         };
         Icon::new(icon)
             .small()
@@ -139,15 +146,18 @@ impl Section {
     }
 }
 
-fn activity(thread: &ConversationSummary) -> (Section, &'static str) {
-    if thread.settled {
-        return (Section::Settled, "Settled");
-    }
+fn activity(thread: &ConversationSummary, stashed: bool) -> (Section, &'static str) {
     if thread.needs_approval {
         return (Section::Attention, "Approval requested");
     }
     if thread.needs_answer {
         return (Section::Attention, "Answer requested");
+    }
+    if stashed {
+        return (Section::Stash, "Stashed");
+    }
+    if thread.settled {
+        return (Section::Settled, "Settled");
     }
     match thread.status {
         Some(RunStatus::Failed) => (Section::Attention, "Run failed"),
@@ -170,32 +180,34 @@ impl Desktop {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll();
+        let mut grouped: HashMap<Section, Vec<_>> = HashMap::new();
+        for thread in &self.threads {
+            // Opening a conversation and queuing its first message publish
+            // separate updates. Skip the transient row without a run.
+            if thread.status.is_none() && self.pending_first_messages.contains(&thread.id) {
+                continue;
+            }
+            let stashed = self.stash.contains(&thread.id);
+            let (section, status) = activity(thread, stashed);
+            grouped
+                .entry(section)
+                .or_default()
+                .push((thread, status, stashed));
+        }
         for section in [
             Section::Attention,
             Section::Ready,
             Section::Working,
             Section::Settled,
+            Section::Stash,
         ] {
-            // Keep the space above both lower groups even when Working is empty.
+            // Keep the space above the lower groups even when Working is empty.
             if section == Section::Working {
                 list = list.child(div().flex_grow());
             }
-            let rows: Vec<_> = self
-                .threads
-                .iter()
-                // Opening a conversation and queuing its first message publish
-                // separate updates. Skip the transient row without a run.
-                .filter(|thread| {
-                    thread.status.is_some() || !self.pending_first_messages.contains(&thread.id)
-                })
-                .filter_map(|thread| {
-                    let (group, status) = activity(thread);
-                    (section == group).then_some((thread, status))
-                })
-                .collect();
-            if rows.is_empty() {
+            let Some(rows) = grouped.remove(&section) else {
                 continue;
-            }
+            };
 
             let title = section.label();
             let count = rows.len();
@@ -212,7 +224,7 @@ impl Desktop {
                         || Some(&thread.id) == selected,
                 )
             };
-            let fully_expanded = rows.iter().all(|(thread, _)| visible(thread));
+            let fully_expanded = rows.iter().all(|(thread, _, _)| visible(thread));
             let header = Button::new(SharedString::from(format!("toggle-{title}")))
                 .w_full()
                 .small()
@@ -250,15 +262,18 @@ impl Desktop {
                     view.expanded_sections.insert(section, !fully_expanded);
                     cx.notify();
                 }));
-            let group =
-                v_flex()
-                    .flex_shrink_0()
-                    .pb_3()
-                    .gap_1()
-                    .child(control!(format!("section/{title}/{count}"), header))
-                    .children(rows.into_iter().filter(|(thread, _)| visible(thread)).map(
-                        |(thread, status)| self.sidebar_row(thread, section, status, width, cx),
-                    ));
+            let group = v_flex()
+                .flex_shrink_0()
+                .pb_3()
+                .gap_1()
+                .child(control!(format!("section/{title}/{count}"), header))
+                .children(
+                    rows.into_iter()
+                        .filter(|(thread, _, _)| visible(thread))
+                        .map(|(thread, status, stashed)| {
+                            self.sidebar_row(thread, section, status, stashed, width, cx)
+                        }),
+                );
             list = list.child(group);
         }
         list
@@ -269,6 +284,7 @@ impl Desktop {
         thread: &ConversationSummary,
         section: Section,
         status: &'static str,
+        stashed: bool,
         width: f32,
         cx: &Context<Self>,
     ) -> Div {
@@ -276,10 +292,12 @@ impl Desktop {
         let selected =
             self.local_workspace_visible() && self.current.as_ref().is_some_and(|t| t.id == id);
         let attention = section == Section::Attention;
+        let can_stash =
+            !thread.settled && !stashed && !thread.needs_approval && !thread.needs_answer;
         // Button measures its custom label at its intrinsic width. Bound it to the
         // space inside the sidebar and row padding so long names get an ellipsis.
         let content = v_flex()
-            .w(px(width - 76.))
+            .w(px(width - if can_stash { 108. } else { 76. }))
             .items_start()
             .child(
                 div()
@@ -305,6 +323,35 @@ impl Desktop {
                 && !thread.needs_answer
                 && !thread.active_children
                 && thread.status.is_none_or(RunStatus::terminal));
+        let stash_action = if stashed { "Unstash" } else { "Stash" };
+        let target = id.clone();
+        let name = thread.name.clone();
+        let stash = control!(
+            format!("{stash_action}/{}", thread.name),
+            Button::new(SharedString::from(format!("stash-{}", thread.id.0)))
+                .ghost()
+                .small()
+                .opacity(0.)
+                .group_hover(group, |style| style.opacity(1.))
+                .focus(|style| style.opacity(1.))
+                .icon(if stashed {
+                    IconName::Undo2
+                } else {
+                    IconName::Inbox
+                })
+                .tooltip(stash_action)
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    cx.stop_propagation();
+                    if let Err(error) = view.stash.set(&target, !stashed) {
+                        window.push_notification(
+                            Notification::error(format!("{name}: {error}"))
+                                .title(format!("Could not {}", stash_action.to_lowercase())),
+                            cx,
+                        );
+                    }
+                    cx.notify();
+                }))
+        );
         let target = id.clone();
         let settlement = control!(
             format!("{action}/{}", thread.name),
@@ -347,7 +394,8 @@ impl Desktop {
                     format!("{}/{}/{}", section.label(), thread.name, status),
                     content
                 ))
-                .child(settlement)
+                .when(stashed || can_stash, |button| button.child(stash))
+                .when(!stashed, |button| button.child(settlement))
                 .tooltip(format!("{} · {status}", thread.name))
                 .ghost()
                 .selected(selected)
