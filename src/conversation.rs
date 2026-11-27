@@ -191,7 +191,7 @@ pub struct Desktop {
     launch_setup: bool,
     prompt: Entity<InputState>,
     suggestions: suggestions::Suggestions,
-    instance: ProviderInstanceId,
+    launch_provider: Option<ProviderInstanceId>,
     launch_model: Option<String>,
     launch_model_options: ModelOptions,
     model_picker: Option<Entity<ListState<Models>>>,
@@ -355,7 +355,7 @@ impl Desktop {
             }),
             prompt: cx.new(|cx| InputState::new(window, cx).auto_grow(2, 5)),
             suggestions: suggestions::Suggestions::default(),
-            instance: Provider::Codex.key().into(),
+            launch_provider: None,
             launch_model: None,
             launch_model_options: ModelOptions::default(),
             model_picker: None,
@@ -937,7 +937,7 @@ impl Desktop {
         self.pull_request_watch = None;
         self.pull_request = None;
         self.launch_workspace = LaunchWorkspace::default();
-        self.instance = Provider::Codex.key().into();
+        self.launch_provider = None;
         self.launch_model = None;
         self.launch_model_options = ModelOptions::default();
         self.load_launch_branches(false, cx);
@@ -966,6 +966,7 @@ impl Desktop {
         } else {
             self.launch_workspace.requested_mode()
         };
+        let (model, options) = self.launch_model_selection(cx);
         LaunchDraft {
             name,
             message,
@@ -978,9 +979,9 @@ impl Desktop {
                 .selected_branch(workspace_mode)
                 .cloned(),
             branch: self.branch.read(cx).value().trim().to_owned(),
-            model: self.launch_model.clone(),
-            model_options: self.launch_model_options.clone(),
-            instance: self.instance.clone(),
+            model: model.map(str::to_owned),
+            model_options: options.clone(),
+            instance: self.launch_provider(cx),
         }
     }
 
@@ -1350,8 +1351,8 @@ impl Desktop {
     }
 
     fn choose_provider(&mut self, id: &ProviderInstanceId, cx: &mut Context<Self>) {
-        if self.instance != *id {
-            self.instance.clone_from(id);
+        if self.launch_provider(cx) != *id {
+            self.launch_provider = Some(id.clone());
             self.launch_model = None;
             self.launch_model_options = ModelOptions::default();
             self.mcp_status = None;

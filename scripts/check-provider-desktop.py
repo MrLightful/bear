@@ -137,7 +137,8 @@ def check_models(executable, tmp, env):
         {"click": "model-option/fixture-deep"}, {"see": "model/fixture-deep"},
         *send_message("Explicit turn"), {"see": "Codex/reply Explicit turn"},
         {"see": "Ready/Models/Completed"},
-        {"key": "cmd-n"}, {"click": default}, {"click": "provider/available"},
+        {"key": "cmd-n"}, {"click": "model/fixture-deep"}, {"see": "Fast mode off"},
+        {"click": "provider/available"},
         {"see": "model-option/grok-build"}, {"click": "Favorites"},
         {"click": "model-favorite/fixture-deep/High · Standard"},
         {"click": "model/fixture-deep"}, {"see": "Fast mode off"}, {"key": "escape"},
@@ -196,10 +197,10 @@ def check_legacy_model_favorites(executable, tmp, env):
     unavailable = "unavailable-model-favorite/offline-model/High · Fast"
     run_window(executable, state, [
         {"click": "Settings"}, {"absent": "Default Models"}, {"click": "Back to workspace"},
-        {"click": "model-automatic"}, {"absent": "Edit default models"},
+        {"click": "model/fixture-deep"}, {"see": "Fast mode on"}, {"absent": "Edit default models"},
         {"see": "model-option/fixture-deep"}, {"type": "Automatic"},
         {"absent": "model-option-automatic"}, {"absent": "model-option/fixture-deep"},
-        {"click": "Favorites"}, {"click": unavailable}, {"see": "model-automatic"},
+        {"click": "Favorites"}, {"click": unavailable}, {"see": "model/fixture-deep"},
         {"click": "remove-model-favorite/unavailable/offline-model/High · Fast"}, {"absent": unavailable},
         {"type": "Fixture Deep"},
         {"see": "model-favorite/fixture-deep/High · Fast"}, {"click": migrated},
