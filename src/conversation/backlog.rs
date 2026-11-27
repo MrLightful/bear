@@ -1,5 +1,6 @@
 use super::*;
 use anyhow::{Context as _, ensure};
+use gpui_component::scroll::ScrollableElement;
 use huggler::Attachment;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -46,6 +47,7 @@ pub(super) struct Backlog {
     pub errors: HashMap<Uuid, DraftError>,
     edit: Option<DraftEdit>,
     expanded_details: HashSet<Uuid>,
+    scroll: ScrollHandle,
 }
 
 pub(super) enum DraftError {
@@ -212,6 +214,7 @@ impl Desktop {
         }
         if !self.backlog.open {
             self.backlog.expanded_details.clear();
+            self.backlog.scroll.set_offset(Point::default());
         }
         self.backlog.open = true;
         self.error = self
@@ -498,7 +501,6 @@ impl Desktop {
         width: Pixels,
         cx: &Context<Self>,
     ) -> Div {
-        let count = self.backlog.entries.len();
         v_flex()
             .flex_1()
             .min_h_0()
@@ -514,12 +516,24 @@ impl Desktop {
                     .child(label("Backlog")),
             )
             .child(
+                control!("Backlog list", self.backlog_viewport(width, cx))
+                    .flex_1()
+                    .min_h_0(),
+            )
+    }
+
+    fn backlog_viewport(&self, width: Pixels, cx: &Context<Self>) -> Div {
+        let count = self.backlog.entries.len();
+        div()
+            .relative()
+            .size_full()
+            .child(
                 v_flex()
                     .id("backlog-list")
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .items_center()
                     .overflow_y_scroll()
+                    .track_scroll(&self.backlog.scroll)
                     .child(
                         v_flex()
                             // Measure wrapped rows against the pane, including inside the scroller.
@@ -576,6 +590,7 @@ impl Desktop {
                             ),
                     ),
             )
+            .vertical_scrollbar(&self.backlog.scroll)
     }
 
     fn new_draft_button(&self, empty: bool, cx: &Context<Self>) -> Div {

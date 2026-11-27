@@ -25,6 +25,7 @@ def check(executable, root, screenshots=None):
     env["HUGGLER_CODEX"] = str(ROOT / "tests/fixtures/context-provider.py")
     title = "Review the saved context"
     prompt = "$build-guide Review the attached notes and summarize the findings."
+    long_prompt = "\n".join(f"Draft line {index}" for index in range(80))
     marker = "⟦Attachment 1: notes.txt⟧"
     send = f"Send draft/{title}"
     card = f"Draft card/{title}"
@@ -70,6 +71,14 @@ def check(executable, root, screenshots=None):
         {"click": edit}, {"absent": send},
         {"above": ["Draft message", "Conversation title (optional)"]}, *capture("edit"),
         {"click": "Cancel draft edit"}, {"see": send}, {"click": edit},
+        {"click": "Draft message"}, {"key": "cmd-a"}, {"type": long_prompt},
+        {"click": "Save draft changes"}, {"click": details},
+        # Click inside the track, clear of the macOS window resize edges.
+        {"resize": [1120, 740]}, "show_scrollbars",
+        {"click_from_bottom_right": ["Backlog list", [10, 20]]},
+        {"in_lower_half": title_field},
+        {"click_from_bottom_right": ["Backlog list", [10, 680]]},
+        {"click": details}, {"click": edit},
         {"click": "Draft message"}, {"key": "cmd-a"}, {"type": prompt},
         {"click": "Save draft changes"}, {"see": card},
         {"click": "Create a draft"}, {"click": "First message"},
