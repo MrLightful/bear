@@ -5,6 +5,8 @@ use huggler::{ActivityKind, ActivityStatus, ToolTrace, ToolTraceSource};
 
 const PAGE_SIZE: usize = 50;
 const ROW_HEIGHT: Pixels = px(42.);
+const LIST_MARGIN: Pixels = px(4.);
+const FAILURE_DOT: Pixels = px(6.);
 const FILTERS: [(Option<ToolTraceSource>, &str); 3] = [
     (None, "All"),
     (Some(ToolTraceSource::Mcp), "MCP"),
@@ -208,6 +210,7 @@ impl Desktop {
     pub(super) fn trace_panel(
         &self,
         thread: &ThreadId,
+        panel_width: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -266,10 +269,13 @@ impl Desktop {
             }
             Ok(rows) => {
                 let row_thread = thread.clone();
+                // The panel has a leading border and the scroll viewport has a focus border.
+                let viewport_width = panel_width - px(1.) - LIST_MARGIN * 2.;
+                let row_width = viewport_width - px(2.);
                 let list = uniform_list(
                     "trace-list",
                     rows.len().min(traces.limit + 1),
-                    cx.processor(move |view, range: std::ops::Range<usize>, _, cx| {
+                    cx.processor(move |view, range: std::ops::Range<usize>, window, cx| {
                         let traces = &view.workspaces[&row_thread].traces;
                         let Ok(rows) = &traces.entries else {
                             return Vec::new();
@@ -279,7 +285,7 @@ impl Desktop {
                                 if index == traces.limit {
                                     view.load_older_traces_row(cx)
                                 } else {
-                                    view.trace_row(&rows[index], cx)
+                                    view.trace_row(&rows[index], row_width, window, cx)
                                 }
                             })
                             .collect()
@@ -303,7 +309,8 @@ impl Desktop {
                 )
                 .flex_1()
                 .min_h_0()
-                .m_1()
+                .w(viewport_width)
+                .m(LIST_MARGIN)
                 .into_any_element()
             }
         };
@@ -334,23 +341,90 @@ impl Desktop {
         ))
     }
 
-    fn trace_row(&self, trace: &ToolTrace, cx: &Context<Self>) -> Div {
+    fn trace_row(
+        &self,
+        trace: &ToolTrace,
+        width: Pixels,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> Div {
         let presentation = TracePresentation::new(trace);
         let titled = single_line(presentation.title);
         let label = presentation
             .label
             .map_or_else(|| titled.clone(), str::to_owned);
-        let target = if presentation.label.is_some() && !trace.item.title.trim().is_empty() {
-            single_line(&presentation.target)
+        let target = single_line(&presentation.target);
+        let preview = presentation.label.is_some()
+            && !trace.item.title.trim().is_empty()
+            && !target.trim().is_empty()
+            && target != label;
+        let failed = trace.item.status == ActivityStatus::Failed;
+        let status = status(trace);
+        let show_status = !failed && trace.item.status != ActivityStatus::Completed;
+        let rem = window.rem_size();
+        // Two half-rem insets, a half-rem gap, and the three-quarter-rem icon.
+        let text_width = width - rem * 2.25;
+        let status_width = if failed {
+            FAILURE_DOT + rem * 0.375
+        } else if show_status {
+            let run = window.text_style().to_run(status.len());
+            window
+                .text_system()
+                .layout_line(status, rem * 0.75, &[run], None)
+                .width
+                .ceil()
+                + rem * 0.375
         } else {
-            source_label(trace.source).to_owned()
+            px(0.)
         };
+        let tooltip = format!("{status} · {titled}");
         let key = SharedString::from(format!("trace-{}/{}", trace.run_id, trace.item.id));
         let document = Document::Trace(trace.clone());
         let selected = self
             .current
             .as_ref()
             .is_some_and(|thread| self.workspaces[&thread.id].documents.is_active(&document));
+
+        let heading = h_flex()
+            .gap_1p5()
+            .line_height(px(18.))
+            .child(TraceLabel {
+                text: label.into(),
+                width: text_width - status_width,
+            })
+            .when(failed, |row| {
+                row.child(
+                    div()
+                        .size(FAILURE_DOT)
+                        .flex_none()
+                        .rounded_full()
+                        .bg(status_color(trace, cx)),
+                )
+            })
+            .when(show_status, |row| {
+                row.child(hint(status, cx).text_xs().flex_none())
+            });
+        let body = v_flex()
+            .min_w_0()
+            .flex_1()
+            .items_start()
+            .overflow_hidden()
+            .child(heading)
+            .when(preview, |body| {
+                body.child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .text_xs()
+                        .line_height(px(15.))
+                        .when(trace.item.kind == ActivityKind::Command, |text| {
+                            text.font_family(cx.theme().mono_font_family.clone())
+                        })
+                        .child(TraceLabel {
+                            text: target.into(),
+                            width: text_width,
+                        }),
+                )
+            });
 
         control!(
             format!(
@@ -368,39 +442,19 @@ impl Desktop {
                 .w_full()
                 .min_w_0()
                 .justify_start()
-                .px_2()
-                .gap_3()
+                .px_0()
                 .selected(selected)
                 .when(selected, |button| button.bg(cx.theme().sidebar_accent))
-                .tooltip(titled.clone())
-                .child(presentation.icon(cx))
+                .tooltip(tooltip)
                 .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .items_start()
-                        .child(
-                            div()
-                                .max_w_full()
-                                .line_height(px(18.))
-                                .truncate()
-                                .child(label)
-                        )
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .w_full()
-                                .overflow_hidden()
-                                .text_xs()
-                                .line_height(px(14.))
-                                .child(
-                                    div()
-                                        .text_color(status_color(trace, cx))
-                                        .flex_none()
-                                        .child(status(trace))
-                                )
-                                .child(hint(target, cx).text_xs().min_w_0().truncate())
-                        ),
+                    h_flex()
+                        // Button's content wrapper sizes to its children. Give it the list width
+                        // so long titles and previews can truncate inside the row.
+                        .w(width)
+                        .px_2()
+                        .gap_2()
+                        .child(presentation.icon(cx))
+                        .child(body),
                 )
                 .on_click(cx.listener(move |view, event: &ClickEvent, window, cx| {
                     view.open_sidebar_document(
@@ -413,6 +467,26 @@ impl Desktop {
         )
         .h(ROW_HEIGHT)
         .w_full()
+    }
+}
+
+#[derive(IntoElement)]
+struct TraceLabel {
+    text: SharedString,
+    width: Pixels,
+}
+
+impl RenderOnce for TraceLabel {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let run = style.to_run(self.text.len());
+        // GPUI can measure and cache the untruncated text during intrinsic sizing.
+        let text = cx
+            .text_system()
+            .line_wrapper(style.font(), font_size)
+            .truncate_line(self.text, self.width, "…", &mut vec![run]);
+        div().max_w(self.width).truncate().child(text)
     }
 }
 
