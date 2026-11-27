@@ -29,7 +29,7 @@ impl Default for Traces {
     }
 }
 
-pub(super) fn title(trace: &ToolTrace) -> &str {
+fn title(trace: &ToolTrace) -> &str {
     if !trace.item.title.trim().is_empty() {
         return &trace.item.title;
     }
@@ -42,19 +42,109 @@ pub(super) fn title(trace: &ToolTrace) -> &str {
     }
 }
 
-pub(super) fn icon(trace: &ToolTrace, cx: &App) -> Icon {
-    let name = match trace.item.kind {
-        _ if trace.source == ToolTraceSource::Mcp => IconName::Inspector,
-        ActivityKind::Command => IconName::SquareTerminal,
-        ActivityKind::FileChange => IconName::File,
-        ActivityKind::Search => IconName::Search,
-        ActivityKind::Agent => IconName::Bot,
-        _ => IconName::Settings2,
+/// Strip the provider's shell wrapper for display only. Keep the recorded command for Raw.
+fn display_command(command: &str) -> std::borrow::Cow<'_, str> {
+    let Some((shell, arguments)) = command.split_once(" -lc ") else {
+        return command.into();
     };
-    Icon::new(name)
-        .xsmall()
-        .flex_shrink_0()
-        .text_color(cx.theme().muted_foreground)
+    if !matches!(shell, "/bin/zsh" | "/bin/bash" | "/bin/sh") {
+        return command.into();
+    }
+    match shlex::split(arguments) {
+        Some(mut words) if words.len() == 1 => words.remove(0).into(),
+        // Huggler 0.0.1 caps titles at 512 bytes, at a UTF-8 boundary.
+        None if (509..=512).contains(&command.len()) => arguments
+            .strip_prefix(['\'', '"'])
+            .map_or_else(|| command.into(), |prefix| format!("{prefix}…").into()),
+        _ => command.into(),
+    }
+}
+
+fn display_target<'a>(trace: &'a ToolTrace, title: &'a str) -> std::borrow::Cow<'a, str> {
+    if trace.source == ToolTraceSource::Mcp {
+        return title.into();
+    }
+    match trace.item.kind {
+        ActivityKind::Command => display_command(title),
+        ActivityKind::FileChange => title.rsplit('/').next().unwrap_or(title).into(),
+        _ => image_path_from_title(trace)
+            .map(|path| path.rsplit('/').next().unwrap_or(path))
+            .unwrap_or(title)
+            .into(),
+    }
+}
+
+fn summary(trace: &ToolTrace, target: &str) -> Option<(&'static str, IconName)> {
+    if trace.source == ToolTraceSource::Mcp {
+        return None;
+    }
+    Some(match trace.item.kind {
+        ActivityKind::Command => {
+            let mut words = target.split_whitespace();
+            match (words.next(), words.next()) {
+                (Some("rg"), Some("--files")) => ("List files", IconName::Folder),
+                (Some("rg" | "grep"), _) => ("Search files", IconName::Search),
+                (Some("sed"), Some("-i")) => ("Edit text", IconName::File),
+                (Some("sed" | "cat" | "head" | "tail"), _) => ("Run text command", IconName::File),
+                (Some("ls" | "pwd"), _) => ("Inspect files", IconName::Folder),
+                (Some("git"), Some("status")) => ("Check Git status", IconName::SquareTerminal),
+                (Some("git"), Some("diff")) => ("Inspect Git diff", IconName::SquareTerminal),
+                (Some("git"), _) => ("Run Git", IconName::SquareTerminal),
+                (Some("cargo"), Some("test")) => ("Run Rust tests", IconName::SquareTerminal),
+                (Some("cargo"), Some("check")) => ("Check Rust code", IconName::SquareTerminal),
+                (Some("cargo"), _) => ("Run Cargo", IconName::SquareTerminal),
+                (Some("python" | "python3"), _) => ("Run Python", IconName::SquareTerminal),
+                _ => ("Shell command", IconName::SquareTerminal),
+            }
+        }
+        ActivityKind::FileChange => ("File changes", IconName::File),
+        ActivityKind::Search => ("Web activity", IconName::Globe),
+        ActivityKind::Tool if image_path_from_title(trace).is_some() => {
+            ("View image", IconName::Eye)
+        }
+        _ => return None,
+    })
+}
+
+// Huggler 0.0.1 records image views as generic tools with the path only in the title.
+pub(super) fn image_path_from_title(trace: &ToolTrace) -> Option<&str> {
+    (trace.source == ToolTraceSource::Standard && trace.item.kind == ActivityKind::Tool)
+        .then(|| trace.item.title.strip_prefix("View image · "))
+        .flatten()
+        .filter(|path| !path.trim().is_empty())
+}
+
+pub(super) struct TracePresentation<'a> {
+    pub title: &'a str,
+    pub target: std::borrow::Cow<'a, str>,
+    pub label: Option<&'static str>,
+    icon: IconName,
+}
+
+impl<'a> TracePresentation<'a> {
+    pub(super) fn new(trace: &'a ToolTrace) -> Self {
+        let title = title(trace);
+        let target = display_target(trace, title);
+        let (label, icon) = match summary(trace, &target) {
+            Some((label, icon)) => (Some(label), icon),
+            None if trace.source == ToolTraceSource::Mcp => (None, IconName::Inspector),
+            None if trace.item.kind == ActivityKind::Agent => (None, IconName::Bot),
+            None => (None, IconName::Settings2),
+        };
+        Self {
+            title,
+            target,
+            label,
+            icon,
+        }
+    }
+
+    pub(super) fn icon(&self, cx: &App) -> Icon {
+        Icon::new(self.icon.clone())
+            .xsmall()
+            .flex_shrink_0()
+            .text_color(cx.theme().muted_foreground)
+    }
 }
 
 pub(super) fn source_label(source: ToolTraceSource) -> &'static str {
@@ -245,10 +335,16 @@ impl Desktop {
     }
 
     fn trace_row(&self, trace: &ToolTrace, cx: &Context<Self>) -> Div {
-        let titled = title(trace)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let presentation = TracePresentation::new(trace);
+        let titled = single_line(presentation.title);
+        let label = presentation
+            .label
+            .map_or_else(|| titled.clone(), str::to_owned);
+        let target = if presentation.label.is_some() && !trace.item.title.trim().is_empty() {
+            single_line(&presentation.target)
+        } else {
+            source_label(trace.source).to_owned()
+        };
         let key = SharedString::from(format!("trace-{}/{}", trace.run_id, trace.item.id));
         let document = Document::Trace(trace.clone());
         let selected = self
@@ -257,7 +353,14 @@ impl Desktop {
             .is_some_and(|thread| self.workspaces[&thread.id].documents.is_active(&document));
 
         control!(
-            format!("Trace/{titled}"),
+            format!(
+                "Trace/{}",
+                presentation
+                    .title
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
             Button::new(key)
                 .ghost()
                 .small()
@@ -270,7 +373,7 @@ impl Desktop {
                 .selected(selected)
                 .when(selected, |button| button.bg(cx.theme().sidebar_accent))
                 .tooltip(titled.clone())
-                .child(icon(trace, cx))
+                .child(presentation.icon(cx))
                 .child(
                     v_flex()
                         .min_w_0()
@@ -281,22 +384,22 @@ impl Desktop {
                                 .max_w_full()
                                 .line_height(px(18.))
                                 .truncate()
-                                .child(titled)
+                                .child(label)
                         )
                         .child(
                             h_flex()
                                 .gap_1p5()
-                                .max_w_full()
+                                .w_full()
                                 .overflow_hidden()
                                 .text_xs()
                                 .line_height(px(14.))
-                                .child(hint(source_label(trace.source), cx).text_xs().truncate())
                                 .child(
                                     div()
                                         .text_color(status_color(trace, cx))
-                                        .truncate()
+                                        .flex_none()
                                         .child(status(trace))
                                 )
+                                .child(hint(target, cx).text_xs().min_w_0().truncate())
                         ),
                 )
                 .on_click(cx.listener(move |view, event: &ClickEvent, window, cx| {
@@ -311,4 +414,8 @@ impl Desktop {
         .h(ROW_HEIGHT)
         .w_full()
     }
+}
+
+fn single_line(text: &str) -> String {
+    text.replace(['\n', '\r', '\t'], " ")
 }

@@ -454,6 +454,7 @@ def check_editor_reload(binary):
 
 
 def check_transcript(binary):
+    command = "/bin/zsh -lc 'cargo test --locked --test context'"
     with tempfile.TemporaryDirectory(prefix="huggler desktop transcript ") as tmp:
         root = Path(tmp)
         checkout = root / "checkout"
@@ -486,9 +487,9 @@ def check_transcript(binary):
             {"click": "activity/1 tool call"}, {"see": "activity-item/src/conversation.rs"},
             {"right_of": ["Traces tab", "Changes tab"]}, {"click": "Traces tab"},
             {"see": "Trace/docs / lookup"}, {"see": "Trace/src/conversation.rs"},
-            {"see": "Trace/cargo test --locked --test context"}, {"absent": "Trace/Context compacted"},
+            {"see": f"Trace/{command}"}, {"absent": "Trace/Context compacted"},
             {"click": "Trace filter/MCP"}, {"see": "Trace/docs / lookup"},
-            {"absent": "Trace/cargo test --locked --test context"},
+            {"absent": f"Trace/{command}"},
             {"click": "Trace/docs / lookup"}, {"see": "Tool trace/docs / lookup"},
             {"max_height": ["Tool trace/docs / lookup", 24]},
             {"right_of": ["Trace tab/docs / lookup", "Chat tab"]},
@@ -503,12 +504,18 @@ def check_transcript(binary):
             {"see": "Trace field/query"}, {"absent": "File tab/notes.txt"},
             {"click": "Keep open Trace tab/docs / lookup"},
             {"click": "Trace filter/Std"}, {"absent": "Trace/docs / lookup"},
-            {"click": "Trace/cargo test --locked --test context"},
-            {"max_height": ["Tool trace/cargo test --locked --test context", 24]},
+            {"click": "Trace/src/conversation.rs"}, {"see": "Trace field/Modified"},
+            {"click": "Document mode/Raw"}, {"absent": "Trace field/Modified"},
+            {"contains": "Trace Input/"},
+            {"click": f"Trace/{command}"},
+            {"max_height": [f"Tool trace/{command}", 24]},
+            {"see": "Trace Command/cargo test --locked --test context"},
+            {"click": "Document mode/Raw"}, {"see": f"Trace Command/{command}"},
+            {"click": "Document mode/Summary"},
             {"see": "Trace Output/All 12 checks passed."},
             {"see": "Trace tab/docs / lookup"},
-            {"click": "Trace/cargo test --locked --test context"},
-            {"key": "cmd-w"}, {"absent": "Trace tab/cargo test --locked --test context"},
+            {"click": f"Trace/{command}"},
+            {"key": "cmd-w"}, {"absent": f"Trace tab/{command}"},
             {"see": "Tool trace/docs / lookup"},
             {"click": "Close Trace tab/docs / lookup"}, {"see": "Message"},
             {"click": "Trace filter/All"}, {"see": "Trace/docs / lookup"},
@@ -520,13 +527,14 @@ def check_transcript(binary):
             {"click": "activity/2 tool calls · 2 messages"}, {"click": "Command 1 output"},
             {"see": "command-output/All 12 checks passed."},
             {"click": "Traces tab"}, {"see": "Trace/docs / lookup"},
-            {"click": "Trace/cargo test --locked --test context"},
+            {"click": f"Trace/{command}"},
             {"see": "Trace Output/All 12 checks passed."},
         ], env)
     print("Native transcript activity, tool trace filters and saved command output passed")
 
 
 def check_virtual_lists(binary):
+    recorded = ("/bin/zsh -lc 'python3 " + "x" * 512)[:512]
     with tempfile.TemporaryDirectory(prefix="huggler virtual lists ") as tmp:
         root = Path(tmp)
         checkout = root / "checkout"
@@ -556,9 +564,12 @@ def check_virtual_lists(binary):
             traces_end,
             {"absent": "Trace/fixture command 54"}, {"click": "Load older traces"},
             traces_end,
-            {"click": "Trace/fixture command 0"}, {"see": "Trace Output/Trace result 0"},
+            {"click": f"Trace/{recorded}"}, {"see": "Trace Output/Trace result 0"},
+            {"contains": "Trace Command/python3 "},
+            {"absent": f"Trace Command/{recorded}"},
+            {"click": "Document mode/Raw"}, {"see": f"Trace Command/{recorded}"},
             {"click": "Trace filter/Std"}, {"see": "Trace/fixture command 54"},
-            {"absent": "Trace/fixture command 0"},
+            {"absent": f"Trace/{recorded}"},
             {"click_from_bottom_right": ["Traces list", [0.5, 8]]},
             {"key": "pagedown"}, {"absent": "Trace/fixture command 54"},
             {"key": "end"}, {"see": "Load older traces"},

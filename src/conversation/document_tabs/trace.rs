@@ -94,41 +94,100 @@ impl DocumentTab {
         trace: &ToolTrace,
         cx: &Context<Desktop>,
     ) -> impl IntoElement {
-        let title = traces::title(trace);
+        let presentation = traces::TracePresentation::new(trace);
         let theme = cx.theme();
         let command = trace.item.kind == huggler::ActivityKind::Command;
         let mcp = trace.source == huggler::ToolTraceSource::Mcp;
+        let standard_tool = trace.source == huggler::ToolTraceSource::Standard
+            && trace.item.kind == huggler::ActivityKind::Tool;
         let mut details = v_flex().gap_5().px_4().py_4().w_full().max_w(px(760.));
         let content = self.trace.as_ref().expect("opened trace");
-        let mut has_fields = false;
+        let raw = self.mode == DocumentMode::Raw;
+        let image_path = traces::image_path_from_title(trace);
+        let mut has_summary = command && !trace.item.title.trim().is_empty();
+        if has_summary {
+            let recorded = &trace.item.title;
+            let display = if raw {
+                recorded.as_str()
+            } else {
+                presentation.target.as_ref()
+            };
+            let end = if raw {
+                display.len()
+            } else {
+                let fourth_newline = display.match_indices('\n').nth(3).map(|(index, _)| index);
+                let limit = display.floor_char_boundary(512);
+                fourth_newline.map_or(limit, |index| index.min(limit))
+            };
+            details = details.child(
+                trace_section("Command", &display[..end], None, false, cx)
+                    .when(end < display.len(), |section| {
+                        section.child(hint("See the recorded command in Raw", cx))
+                    }),
+            );
+        }
         match &content.payload {
             Err(error) => {
                 details = details.child(hint(format!("Could not read trace details. {error}"), cx));
             }
             Ok(payload) => {
                 if let Some(input) = &payload.input {
-                    let fields = mcp.then(|| trace_fields(input)).flatten();
-                    has_fields |= fields.is_some();
-                    details = details.child(trace_section(
-                        "Input",
-                        input,
-                        fields.filter(|_| self.mode != DocumentMode::Raw),
-                        false,
-                        cx,
-                    ));
+                    let standard = (!mcp)
+                        .then(|| standard_input(trace.item.kind, input))
+                        .flatten();
+                    let fields = (mcp || standard_tool)
+                        .then(|| trace_fields(input))
+                        .flatten();
+                    has_summary |= standard.is_some() || fields.is_some();
+                    if let Some((label, rows)) = standard.filter(|_| !raw) {
+                        details = details.child(trace_section(label, input, Some(rows), false, cx));
+                    } else {
+                        details = details.child(trace_section(
+                            "Input",
+                            input,
+                            fields.filter(|_| !raw),
+                            false,
+                            cx,
+                        ));
+                    }
                 }
                 if let Some(result) = &payload.result {
-                    let fields = mcp.then(|| trace_fields(result)).flatten();
-                    has_fields |= fields.is_some();
+                    let fields = (mcp || standard_tool)
+                        .then(|| trace_fields(result))
+                        .flatten();
+                    let acp_text = standard_tool.then(|| acp_text_result(result)).flatten();
+                    has_summary |= fields.is_some() || acp_text.is_some();
+                    let display = if raw {
+                        result
+                    } else {
+                        acp_text.as_deref().unwrap_or(result)
+                    };
                     details = details.child(trace_section(
                         "Result",
-                        result,
-                        fields.filter(|_| self.mode != DocumentMode::Raw),
+                        display,
+                        fields.filter(|_| !raw),
                         trace.item.status == huggler::ActivityStatus::Failed,
                         cx,
                     ));
                 }
-                if !command && payload.input.is_none() && payload.result.is_none() {
+                if let Some(path) = image_path {
+                    details = details.child(trace_section("Image path", path, None, false, cx));
+                } else if presentation.label.is_some()
+                    && matches!(
+                        trace.item.kind,
+                        huggler::ActivityKind::FileChange | huggler::ActivityKind::Search
+                    )
+                    && payload.input.is_none()
+                    && !trace.item.title.trim().is_empty()
+                {
+                    let label = if trace.item.kind == huggler::ActivityKind::FileChange {
+                        "Changed files"
+                    } else {
+                        "Query"
+                    };
+                    details =
+                        details.child(trace_section(label, presentation.title, None, false, cx));
+                } else if !has_summary && payload.input.is_none() && payload.result.is_none() {
                     details = details.child(hint("No input or result recorded", cx));
                 }
             }
@@ -175,19 +234,21 @@ impl DocumentTab {
                             .justify_center()
                             .rounded_md()
                             .bg(theme.muted)
-                            .child(traces::icon(trace, cx)),
+                            .child(presentation.icon(cx)),
                     )
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .child(control!(
-                                format!("Tool trace/{title}"),
+                                format!("Tool trace/{}", presentation.title),
                                 div()
                                     .text_base()
                                     .line_height(px(22.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title.to_owned())
+                                    .child(
+                                        presentation.label.unwrap_or(presentation.title).to_owned()
+                                    )
                             ))
                             .child(
                                 h_flex()
@@ -202,10 +263,13 @@ impl DocumentTab {
                                     ),
                             ),
                     )
-                    .when(has_fields, |header| {
+                    .when(has_summary, |header| {
                         header.child(self.mode_control(
                             &[
-                                (DocumentMode::Preview, "Fields"),
+                                (
+                                    DocumentMode::Preview,
+                                    if mcp { "Fields" } else { "Summary" },
+                                ),
                                 (DocumentMode::Raw, "Raw"),
                             ],
                             cx,
@@ -230,12 +294,92 @@ impl DocumentTab {
     }
 }
 
-type TraceFields = serde_json::Map<String, serde_json::Value>;
+type TraceFields = Vec<(String, serde_json::Value)>;
 
 fn trace_fields(text: &str) -> Option<TraceFields> {
-    serde_json::from_str::<TraceFields>(text)
-        .ok()
-        .filter(|fields| !fields.is_empty())
+    let fields = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).ok()?;
+    (!fields.is_empty()).then(|| fields.into_iter().collect())
+}
+
+fn standard_input(kind: huggler::ActivityKind, input: &str) -> Option<(&'static str, TraceFields)> {
+    use huggler::ActivityKind;
+    use serde_json::Value;
+
+    match kind {
+        ActivityKind::FileChange => {
+            let changes: Vec<Value> = serde_json::from_str(input).ok()?;
+            let rows = changes
+                .into_iter()
+                .map(|change| {
+                    let path = change["path"].as_str()?;
+                    let label = match change["kind"]["type"].as_str() {
+                        Some("add") => "Added",
+                        Some("delete") => "Deleted",
+                        Some("update") if change["kind"]["move_path"].is_string() => "Moved",
+                        Some("update") => "Modified",
+                        _ => "Path",
+                    };
+                    let target = match change["kind"]["move_path"].as_str() {
+                        Some(target) => format!("{path} → {target}"),
+                        None => path.to_owned(),
+                    };
+                    Some((label.to_owned(), Value::String(target)))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            (!rows.is_empty()).then_some(("Changed files", rows))
+        }
+        ActivityKind::Search => {
+            let action: Value = serde_json::from_str(input).ok()?;
+            let (label, keys) = match action["type"].as_str()? {
+                "search" => (
+                    "Search the web",
+                    &[("query", "Query"), ("queries", "Query")][..],
+                ),
+                "openPage" => ("Open web page", &[("url", "URL")][..]),
+                "findInPage" => (
+                    "Find in page",
+                    &[("url", "URL"), ("pattern", "Pattern")][..],
+                ),
+                _ => return None,
+            };
+            let rows: Vec<_> = keys
+                .iter()
+                .flat_map(|&(key, label)| {
+                    match &action[key] {
+                        Value::Array(values) => {
+                            values.iter().filter(|value| value.is_string()).collect()
+                        }
+                        value @ Value::String(_) => vec![value],
+                        _ => Vec::new(),
+                    }
+                    .into_iter()
+                    .map(move |value| (label.to_owned(), value.clone()))
+                })
+                .collect();
+            (!rows.is_empty()).then_some((label, rows))
+        }
+        _ => None,
+    }
+}
+
+// ACP results may contain nested content blocks. Keep mixed or unknown blocks in Raw.
+fn acp_text_result(result: &str) -> Option<String> {
+    let entries = serde_json::from_str::<Vec<serde_json::Value>>(result).ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    let blocks = entries
+        .iter()
+        .map(|entry| {
+            let content = &entry["content"];
+            if entry["type"] == "content" && content["type"] == "text" {
+                content["text"].as_str()
+            } else {
+                None
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(blocks.join("\n\n"))
 }
 
 fn trace_section(
