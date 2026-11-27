@@ -630,7 +630,6 @@ impl Desktop {
 
     fn draft_details(
         &self,
-        id: Uuid,
         draft: &SavedDraft,
         message: &str,
         editing: bool,
@@ -735,19 +734,6 @@ impl Desktop {
                         details.child(draft_option("Options", model_options.join(" · "), cx))
                     }),
             )
-            .when(!editing, |panel| {
-                panel.child(h_flex().justify_end().child(control!(
-                        format!("Delete draft/{}", launch.name),
-                        Button::new((ElementId::from(id), "delete"))
-                            .small()
-                            .ghost()
-                            .label("Delete draft")
-                            .disabled(self.backlog.sending == Some(id))
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.confirm_delete_draft(id, window, cx)
-                            }))
-                    )))
-            })
     }
 
     fn backlog_row(&self, id: Uuid, draft: &SavedDraft, cx: &Context<Self>) -> Div {
@@ -856,6 +842,18 @@ impl Desktop {
                         .gap_2()
                         .max_w_full()
                         .child(control!(
+                            format!("Delete draft/{}", launch.name),
+                            Button::new((ElementId::from(id), "delete"))
+                                .small()
+                                .compact()
+                                .ghost()
+                                .label("Delete draft")
+                                .disabled(sending)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.confirm_delete_draft(id, window, cx)
+                                }))
+                        ))
+                        .child(control!(
                             format!("Edit draft/{}", launch.name),
                             Button::new((ElementId::from(id), "edit"))
                                 .small()
@@ -936,7 +934,7 @@ impl Desktop {
             .when(expanded, |row| {
                 row.child(control!(
                     format!("Draft details panel/{}", launch.name),
-                    self.draft_details(id, draft, &message, edit.is_some(), cx)
+                    self.draft_details(draft, &message, edit.is_some(), cx)
                 ))
             });
         control!(format!("Draft card/{}", launch.name), row)
