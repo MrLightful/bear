@@ -1570,8 +1570,8 @@ impl Desktop {
                         .gap_2()
                         .child(self.model_control(cx))
                         .child(div().flex_1().min_w_0())
-                        .child(self.mcp_status_control(window, cx))
                         .child(self.save_backlog_button(draft_unavailable, cx))
+                        .child(self.mcp_status_control(window, cx))
                         .child(
                             self.send_controls(
                                 &self.starter_attachments,
