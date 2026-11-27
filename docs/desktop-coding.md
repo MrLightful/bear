@@ -86,12 +86,13 @@ Each refresh checks the checkout in a fresh Codex session. Servers that Huggler 
 
 ## Find a conversation by status
 
-The conversation sidebar is visible when Bear opens. Use the left sidebar button in the workspace header to hide or show conversations independently of Changes. The sidebar updates even while you work in another conversation. Needs attention and Ready sit at the top. Working and Settled sit together at the bottom. Click a section heading to collapse or expand it. Each section shows its count and lists the most recently active conversations first.
+The conversation sidebar is visible when Bear opens. Use the left sidebar button in the workspace header to hide or show conversations independently of Changes. The sidebar updates even while you work in another conversation. Needs attention and Ready sit at the top. Working, Settled, and Stash sit at the bottom. Click a section heading to collapse or expand it. Each section shows its count and lists the most recently active conversations first.
 
 - **Needs attention** shows conversations that need an answer or approval, have a paused queue, or ended in an error. The reason appears below the conversation name.
 - **Ready** shows new conversations and conversations whose work completed or was stopped.
 - **Working** shows conversations with queued or active work, including running subagents. By default, only your open conversation appears in this group. A request for your input moves the conversation into **Needs attention** automatically.
 - **Settled** holds conversations you have marked as finished. Hover over an idle conversation and click its checkmark to settle it. Expand **Settled** to browse its history. Hover over a settled conversation and click its undo arrow to unsettle it. Sending a message also reopens the conversation. Settlement persists across restarts. By default, Bear also checks idle conversations every minute and settles them when their branch’s pull request has merged. The checkout must be clean and its current commit must match the merged PR’s head; reused branches with new work stay open. Turn off **Auto-settle merged PRs** in **Settings → General** to disable this behavior. Active or queued work prevents settlement.
+- **Stash** holds local conversations you want to set aside. Hover over an active conversation and click **Stash** (the inbox icon). Work in progress continues, and the conversation stays stashed across restarts. If a stashed run asks for an answer or approval, its conversation appears in **Needs attention** until the request clears. Expand **Stash** and click **Unstash** (the undo arrow) to return the conversation to the group that matches its current activity.
 
 ## Desktop data directory
 

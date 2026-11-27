@@ -155,7 +155,9 @@ impl Desktop {
                     }
                     view.threads
                         .iter()
-                        .filter(|thread| eligible_for_auto_settlement(thread))
+                        .filter(|thread| {
+                            eligible_for_auto_settlement(thread, view.stash.contains(&thread.id))
+                        })
                         .map(|thread| thread.id.clone())
                         .collect::<Vec<_>>()
                 });
@@ -186,7 +188,11 @@ impl Desktop {
                             .update(cx, |view, cx| {
                                 if view.settings.read(cx).preferences().auto_settle_merged_prs
                                     && view.threads.iter().any(|thread| {
-                                        thread.id == id && eligible_for_auto_settlement(thread)
+                                        thread.id == id
+                                            && eligible_for_auto_settlement(
+                                                thread,
+                                                view.stash.contains(&id),
+                                            )
                                     })
                                     && view
                                         .runtime
@@ -456,8 +462,9 @@ impl Desktop {
     }
 }
 
-fn eligible_for_auto_settlement(thread: &ConversationSummary) -> bool {
-    !thread.settled
+fn eligible_for_auto_settlement(thread: &ConversationSummary, stashed: bool) -> bool {
+    !stashed
+        && !thread.settled
         && !thread.needs_approval
         && !thread.needs_answer
         && !thread.active_children
@@ -483,17 +490,21 @@ mod auto_settlement_tests {
             queue_held: false,
             active_children: false,
         };
-        assert!(eligible_for_auto_settlement(&idle));
+        assert!(eligible_for_auto_settlement(&idle, false));
+        assert!(!eligible_for_auto_settlement(&idle, true));
         for status in [
             RunStatus::Queued,
             RunStatus::Starting,
             RunStatus::Running,
             RunStatus::Waiting,
         ] {
-            assert!(!eligible_for_auto_settlement(&ConversationSummary {
-                status: Some(status),
-                ..idle.clone()
-            }));
+            assert!(!eligible_for_auto_settlement(
+                &ConversationSummary {
+                    status: Some(status),
+                    ..idle.clone()
+                },
+                false
+            ));
         }
         for blocked in [
             ConversationSummary {
@@ -517,7 +528,7 @@ mod auto_settlement_tests {
                 ..idle
             },
         ] {
-            assert!(!eligible_for_auto_settlement(&blocked));
+            assert!(!eligible_for_auto_settlement(&blocked, false));
         }
     }
 }

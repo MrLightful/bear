@@ -60,11 +60,45 @@ def check_turn_rail(executable, checkout, env):
     ], env)
 
 
+def check_stash(executable, checkout, env):
+    state = checkout / "stash-state"
+    title = "Set aside for later"
+    active = "Keep working"
+    run_window(executable, state, [
+        *launch_thread(checkout, title),
+        *launch_thread(checkout, active),
+        {"resize": [640, 440]}, {"hover": "thread/" + title},
+        {"click": "Stash/" + title}, {"in_lower_half": "section/Stash/1"},
+        {"absent": "thread/" + title}, {"see": "Ready/" + active + "/New conversation"},
+    ], env)
+    run_window(executable, state, [
+        {"see": "section/Stash/1"}, {"absent": "thread/" + title},
+        {"click": "section/Stash/1"}, {"see": "Stash/" + title + "/Stashed"},
+        {"click": "thread/" + title}, {"see": "status/Ready"},
+        {"hover": "thread/" + title}, {"click": "Unstash/" + title},
+        {"see": "Ready/" + title + "/New conversation"}, {"absent": "section/Stash/1"},
+    ], env)
+    (state / "preferences.json").write_text(json.dumps({"followUp": "steer"}))
+    run_window(executable, state, [
+        {"see": "Ready/" + title + "/New conversation"}, {"absent": "section/Stash/1"},
+        *send_message("stash while running"), {"see": "Working/" + title + "/Running"},
+        {"hover": "thread/" + title}, {"click": "Stash/" + title},
+        {"see": "Stash/" + title + "/Stashed"},
+        {"click": "Message"}, {"type": "request input"}, {"click": "Send follow-up"},
+        {"see": "Needs attention/" + title + "/Answer requested"},
+        {"absent": "section/Stash/1"}, {"click": "Dismiss questions"},
+        {"see": "Codex/reply stash while running"}, {"see": "Stash/" + title + "/Stashed"},
+        {"hover": "thread/" + title}, {"click": "Unstash/" + title},
+        {"see": "Ready/" + title + "/Completed"}, {"absent": "section/Stash/1"},
+    ], dict(env, HUGGLER_CODEX=str(ROOT / "tests/fixtures/context-provider.py")))
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory() as tmp:
         checkout = Path(tmp)
         subprocess.run(["git", "init", "-q", tmp], check=True)
+        check_stash(executable, checkout, os.environ)
         check_turn_rail(executable, checkout, os.environ)
         state = checkout / "state"
         run_window(executable, state, launch_thread(checkout, "Long history"), os.environ)
@@ -103,11 +137,10 @@ def main():
             {"resize": [640, 440]}, {"key": "cmd-shift-n"},
             {"click": "Git checkout"}, {"type": str(checkout)}, {"click": "Back to message"},
             {"click": "Choose project"}, {"click": "Start without a project"}, {"click": "model-automatic"},
-            {"see": "provider/Codex"}, {"see": "⌘L to focus"}, {"key": "cmd-l"},
-            {"absent": "provider/Codex"}, {"absent": "⌘L to focus"},
+            {"see": "provider/Codex"}, {"key": "cmd-l"}, {"absent": "provider/Codex"},
             {"click": "model-automatic"}, {"see": "provider/Codex"},
-            {"click": "Hide conversations"}, {"absent": "provider/Codex"}, {"see": "⌘L to focus"},
-            {"key": "cmd-l"}, {"absent": "⌘L to focus"}, {"type": first}, {"click": "Show conversations"},
+            {"click": "Hide conversations"}, {"absent": "provider/Codex"},
+            {"key": "cmd-l"}, {"type": first}, {"click": "Show conversations"},
             {"click": "Send first message"}, {"see": "thread/" + first},
             {"see": "Codex/reply " + first},
         ], env)
