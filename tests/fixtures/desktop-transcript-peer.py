@@ -36,7 +36,9 @@ for line in sys.stdin:
         continue
     if os.environ.get("HUGGLER_TRACE_LIST_FIXTURE") == "1":
         for index in range(55):
-            complete(f"trace-{index}", "commandExecution", command=f"fixture command {index}",
+            command = ("/bin/zsh -lc 'python3 " + "x" * 512 + "'"
+                       if index == 0 else f"fixture command {index}")
+            complete(f"trace-{index}", "commandExecution", command=command,
                      status="completed", aggregatedOutput=f"Trace result {index}")
         complete("reply", "agentMessage", phase="final_answer", text="Recorded 55 tool calls.")
         emit(method="turn/completed", params={"threadId": session, "turn": {"id": turn, "status": "completed"}})
@@ -45,13 +47,13 @@ for line in sys.stdin:
              text="I’ll start with the conversation layout.")
     complete("comment", "agentMessage", phase="commentary",
              text="I’ll check the transcript layout and run the native workflow checks.")
-    complete("command", "commandExecution", command="cargo test --locked --test context",
+    complete("command", "commandExecution", command="/bin/zsh -lc 'cargo test --locked --test context'",
              status="completed", aggregatedOutput="All 12 checks passed.")
     complete("lookup", "mcpToolCall", server="docs", tool="lookup", status="failed",
              arguments={"query": "Review notes"}, error={"message": "No matching document"})
     time.sleep(8)
     complete("compact", "contextCompaction")
-    complete("patch", "fileChange", status="completed", changes=[{"path": "src/conversation.rs"}])
+    complete("patch", "fileChange", status="completed", changes=[{"path": "src/conversation.rs", "kind": {"type": "update"}}])
     complete("reply", "agentMessage", phase="final_answer",
              text="## Review summary\n\nThe transcript keeps the focus on the conversation. Tool activity "
                   "is grouped by turn, and attachments open inline.\n\n"

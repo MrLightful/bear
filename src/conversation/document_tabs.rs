@@ -761,13 +761,15 @@ impl DocumentTab {
     ) -> impl IntoElement {
         let id = self.id;
         let diff = self.document.comparison();
-        let (name, full_title, _key) = match &self.document {
+        let (name, full_title, _key, icon) = match &self.document {
             Document::Trace(trace) => {
-                let title = traces::title(trace);
+                let presentation = traces::TracePresentation::new(trace);
+                let icon = presentation.icon(cx).into_any_element();
                 (
-                    title.to_owned(),
-                    title.to_owned(),
-                    format!("Trace tab/{title}"),
+                    presentation.target.into_owned(),
+                    presentation.title.to_owned(),
+                    format!("Trace tab/{}", presentation.title),
+                    icon,
                 )
             }
             document => {
@@ -782,7 +784,12 @@ impl DocumentTab {
                     || format!("File tab/{full_path}"),
                     |scope| format!("Diff tab/{scope}/{full_path}"),
                 );
-                (name, full_path, key)
+                (
+                    name,
+                    full_path,
+                    key,
+                    file_icons::icon(path, cx.theme().muted_foreground),
+                )
             }
         };
         let name = name.replace(['\n', '\r', '\t'], " ");
@@ -841,12 +848,7 @@ impl DocumentTab {
                         .when_some(tooltip, |tab, tooltip| tab.tooltip(move |window, cx| {
                             Tooltip::new(tooltip.clone()).build(window, cx)
                         }))
-                        .child(match &self.document {
-                            Document::Trace(trace) => traces::icon(trace, cx).into_any_element(),
-                            document =>
-                                file_icons::icon(document.path().expect("working file path"), muted)
-                                    .into_any_element(),
-                        })
+                        .child(icon)
                         .child(
                             div()
                                 .w(label_width.min(TAB_LABEL_WIDTH))
